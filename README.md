@@ -1,104 +1,91 @@
 # Scalping Machine v1.0
 
-Fully automated aggressive growth scalping bot for **Binance Futures USDT-M**.
-
-> **Separate project.** No dependency on CrossX Trading Bot.
-
----
+Fully automated scalping bot for **Binance Futures USDT-M**, driven by TradingView Pine-Script alerts.
 
 ## Architecture
 
 ```
-TradingView (Pine Script v6)
-        ↓ webhook JSON
-FastAPI /webhook  (port 8002)
+TradingView Pine v5 alertcondition
+        ↓ JSON webhook (token-auth)
+FastAPI /webhook
         ↓
-Signal validation → Score gate → Risk engine
+Self-protection → Score gate → Risk engine → Leverage engine
         ↓
-Leverage engine → Position sizing
+Binance Futures: market/limit + SL + TP1 + TP2
         ↓
-Binance Futures API (market/limit orders)
+SQLite trades log + Telegram alerts + Obsidian export
         ↓
-Telegram alerts + PostgreSQL + Obsidian export
-        ↓
-Every 72h: Evolution engine → upgrade recommendations
+Every 72h: AI optimizer → recommendations to Telegram
 ```
 
----
+## Production deployment (Ubuntu 24.04 VPS)
 
-## Quick Start
-
-### 1. PostgreSQL
 ```bash
-docker-compose up -d db
+ssh root@YOUR_VPS_IP
+curl -fsSL https://raw.githubusercontent.com/shayir222-cell/scalping-machine/main/deploy.sh -o deploy.sh
+bash deploy.sh
+# → first pass creates a stub /home/app/scalping-machine/.env and exits
+nano /home/app/scalping-machine/.env   # fill in credentials
+bash deploy.sh                          # second pass finishes setup
 ```
 
-### 2. Install dependencies
-```bash
+`deploy.sh` provisions: Python 3.12 venv, systemd service with one uvicorn worker, nginx reverse proxy, UFW firewall (only 22/80/443), Let's Encrypt HTTPS via `<IP>.sslip.io` (no domain required). Before activating the service it probes Binance API to catch IP-whitelist / auth issues early. See the script for details.
+
+## Local dev (Windows)
+
+```powershell
 python -m venv .venv
-.venv\Scripts\activate
-pip install -r requirements.txt
+.venv\Scripts\pip install -r requirements.txt
+copy .env.example .env
+# edit .env with Binance + Telegram credentials, BINANCE_TESTNET=true for paper trading
+.venv\Scripts\uvicorn app.main:app --host 127.0.0.1 --port 8002 --reload
 ```
 
-### 3. Configure
-Fill in `.env`:
-- `BINANCE_API_KEY` / `BINANCE_API_SECRET` (Futures API, NOT spot)
-- `TELEGRAM_CHAT_ID` — your Telegram user ID (use @userinfobot)
-- `OBSIDIAN_VAULT_PATH` — path to your Obsidian vault
+Or run `start.bat`.
 
-### 4. Start
-```bash
-uvicorn app.main:app --host 0.0.0.0 --port 8002
-```
-Or double-click `start.bat`.
+## TradingView setup
 
----
+1. Open Pine Editor → paste contents of [`pine/scalp_strategy.pine`](pine/scalp_strategy.pine) → Save → Add to chart.
+2. Open settings of the script on the chart → fill **Webhook token** with the same value as `WEBHOOK_TOKEN` in your `.env`.
+3. Create an alert (Alt+A) → Condition: the script's `LONG`/`SHORT`/`CLOSE_LONG`/`CLOSE_SHORT` alerts. Frequency: **Once per bar close**.
+4. Notifications → **Webhook URL**:
+   ```
+   https://YOUR_VPS_IP.sslip.io/webhook
+   ```
+5. Leave **Message** empty — the Pine script's `alertcondition(message=...)` payload is used automatically.
 
-## TradingView Setup
+Use a 5M chart on a supported pair (BTCUSDT, ETHUSDT, SOLUSDT, BNBUSDT, XRPUSDT, DOGEUSDT).
 
-1. Open **5M chart** on any supported pair (BTCUSDT, ETHUSDT, SOLUSDT, BNBUSDT, XRPUSDT, DOGEUSDT)
-2. Add script from `pine/scalp_strategy.pine`
-3. Create alert → **"Once per bar close"**
-4. Webhook URL: `http://YOUR_SERVER:8002/webhook`
-5. Message body: leave empty (script sends JSON automatically)
-
----
-
-## Telegram Commands
+## Telegram commands
 
 | Command | Action |
 |---|---|
 | `/start` | Enable trading |
-| `/stop` | Disable trading |
+| `/stop` | Disable new trades |
 | `/pause` | Toggle pause |
-| `/status` | Full status |
-| `/pnl` | Today's PnL |
+| `/status` | Equity, mode, open trades, loss streak |
+| `/pnl` | Daily PnL |
 | `/positions` | Open positions |
-| `/top_pairs` | Pair performance |
+| `/top_pairs` | 7-day pair ranking |
+| `/optimizer` | Latest 72h analysis & recommendations |
 | `/report` | 72h evolution report |
-| `/aggressive` | Max leverage mode |
-| `/safe` | Half risk mode |
-| `/normal` | Default mode |
+| `/aggressive` `/normal` `/safe` | Switch risk mode |
 
----
-
-## Signal Score Engine (max 100)
+## Score engine (max 100)
 
 | Component | Max |
 |---|---|
 | Trend (1H + 15M EMA alignment) | 20 |
-| Structure (BOS / CHoCH / Liquidity sweep) | 20 |
+| Structure (BOS / CHoCH / liquidity sweep) | 20 |
 | Volume spike | 15 |
 | Momentum (RSI) | 15 |
 | VWAP context | 10 |
 | Spread / ATR health | 10 |
 | Session edge | 10 |
 
-Minimum to trade: **70** (default). Premium: **90+**.
+Score gate: 70 in AGGRESSIVE mode, 75 in NORMAL, 80 in SAFE. Premium = score ≥ 90.
 
----
-
-## Dynamic Leverage
+## Dynamic leverage
 
 | Symbol | 70-74 | 75-84 | 85-89 | 90+ |
 |---|---|---|---|---|
@@ -108,34 +95,21 @@ Minimum to trade: **70** (default). Premium: **90+**.
 | BNBUSDT | x3 | x5 | x6 | x7 |
 | XRP/DOGE | x3 | x4 | x5 | x6 |
 
-Leverage auto-halved on: 2+ loss streak, DD > 3%, chaotic ATR, outside session.
+Auto-halved on: 3+ loss streak, daily DD > 3%, chaotic ATR, outside session.
 
----
+## Risk rules
 
-## Risk Rules
+- Base risk: 1% per trade
+- Strong setup (score ≥ 85): 1.25%
+- Premium (score ≥ 90): 1.5%
+- Daily stop: −5% true equity → halt until next UTC day
 
-- Base risk: **1%** per trade
-- Strong setup (score ≥85): **1.25%**
-- Premium (score ≥90): **1.5%**
-- Daily stop: **-5%** true equity → halt
-- Pause: 30 min after 2 losses, 60 min after 3+
+## HTTP endpoints
 
----
-
-## 3-Day Evolution Cycle
-
-POST `/evolve` every 72h (or automate with cron/Task Scheduler).
-Analyzes: win rate, fee drag, best pairs/hours, score accuracy.
-Exports recommendations to Obsidian and Telegram `/report`.
-
----
-
-## Endpoints
-
-| Endpoint | Method | Description |
+| Endpoint | Method | Purpose |
 |---|---|---|
-| `/webhook` | POST | Receive TradingView signal |
+| `/webhook` | POST | TradingView signal ingress (token-protected) |
 | `/status` | GET | Bot status |
 | `/trades` | GET | Last 50 trades |
-| `/evolve` | POST | Run 3-day analysis |
+| `/evolve` | POST | Force 72h analysis |
 | `/control/{action}` | POST | start/stop/pause/resume/normal/aggressive/safe |
