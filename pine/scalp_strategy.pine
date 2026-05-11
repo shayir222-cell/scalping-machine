@@ -142,10 +142,17 @@ json_sell = '{"token":"' + webhook_token + '","action":"sell","symbol":"' + symi
 json_close_long  = '{"token":"' + webhook_token + '","action":"close_long","symbol":"'  + syminfo.ticker + '","price":' + str.tostring(close, "#.####") + ',"score":' + str.tostring(int(score_short)) + ',"time":"' + iso_time + '"}'
 json_close_short = '{"token":"' + webhook_token + '","action":"close_short","symbol":"' + syminfo.ticker + '","price":' + str.tostring(close, "#.####") + ',"score":' + str.tostring(int(score_long))  + ',"time":"' + iso_time + '"}'
 
-alertcondition(long_signal,  title="LONG",        message=json_buy)
-alertcondition(short_signal, title="SHORT",       message=json_sell)
-alertcondition(close_long,   title="CLOSE_LONG",  message=json_close_long)
-alertcondition(close_short,  title="CLOSE_SHORT", message=json_close_short)
+if long_signal
+    alert(json_buy, alert.freq_once_per_bar_close)
+
+if short_signal
+    alert(json_sell, alert.freq_once_per_bar_close)
+
+if close_long
+    alert(json_close_long, alert.freq_once_per_bar_close)
+
+if close_short
+    alert(json_close_short, alert.freq_once_per_bar_close)
 
 // ===== BACKTEST =====
 if long_signal and strategy.position_size == 0
