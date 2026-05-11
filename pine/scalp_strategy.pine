@@ -31,9 +31,9 @@ low_vol  = atr < atr_avg * 0.7
 htf_3() => [close, ta.ema(close, 20), ta.ema(close, 50)]
 htf_2() => [close, ta.ema(close, 20)]
 
-[h1_c,  h1_e20,  h1_e50]  = request.security(syminfo.tickerid, "60", htf_3(), lookahead=barmerge.lookahead_off)
-[m15_c, m15_e20, m15_e50] = request.security(syminfo.tickerid, "15", htf_3(), lookahead=barmerge.lookahead_off)
-[m1_c,  m1_e20]           = request.security(syminfo.tickerid, "1",  htf_2(), lookahead=barmerge.lookahead_off)
+[h1_c,  h1_e20,  h1_e50]  = request.security(syminfo.basecurrency + syminfo.currencyid, "60", htf_3(), lookahead=barmerge.lookahead_off)
+[m15_c, m15_e20, m15_e50] = request.security(syminfo.basecurrency + syminfo.currencyid, "15", htf_3(), lookahead=barmerge.lookahead_off)
+[m1_c,  m1_e20]           = request.security(syminfo.basecurrency + syminfo.currencyid, "1",  htf_2(), lookahead=barmerge.lookahead_off)
 
 h1_bull  = h1_c  > h1_e50  and h1_e20  > h1_e50
 h1_bear  = h1_c  < h1_e50  and h1_e20  < h1_e50
@@ -135,12 +135,12 @@ plot(leverage,                                                  "Leverage", disp
 // ===== ALERT JSON =====
 iso_time = str.format_time(timenow, "yyyy-MM-dd'T'HH:mm:ss'Z'", "UTC")
 
-json_buy = '{"token":"' + webhook_token + '","action":"buy","symbol":"' + syminfo.ticker + '","price":' + str.tostring(close, "#.####") + ',"score":' + str.tostring(int(score_long)) + ',"atr":' + str.tostring(atr, "#.####") + ',"tf_alignment":' + str.tostring(align_long) + ',"leverage":' + str.tostring(leverage) + ',"sl":' + str.tostring(long_sl, "#.####") + ',"tp1":' + str.tostring(long_tp1, "#.####") + ',"tp2":' + str.tostring(long_tp2, "#.####") + ',"tp3":' + str.tostring(long_tp3, "#.####") + ',"time":"' + iso_time + '"}'
+json_buy = '{"token":"' + webhook_token + '","action":"buy","symbol":"' + syminfo.basecurrency + syminfo.currency + '","price":' + str.tostring(close, "#.####") + ',"score":' + str.tostring(int(score_long)) + ',"atr":' + str.tostring(atr, "#.####") + ',"tf_alignment":' + str.tostring(align_long) + ',"leverage":' + str.tostring(leverage) + ',"sl":' + str.tostring(long_sl, "#.####") + ',"tp1":' + str.tostring(long_tp1, "#.####") + ',"tp2":' + str.tostring(long_tp2, "#.####") + ',"tp3":' + str.tostring(long_tp3, "#.####") + ',"time":"' + iso_time + '"}'
 
-json_sell = '{"token":"' + webhook_token + '","action":"sell","symbol":"' + syminfo.ticker + '","price":' + str.tostring(close, "#.####") + ',"score":' + str.tostring(int(score_short)) + ',"atr":' + str.tostring(atr, "#.####") + ',"tf_alignment":' + str.tostring(align_short) + ',"leverage":' + str.tostring(leverage) + ',"sl":' + str.tostring(short_sl, "#.####") + ',"tp1":' + str.tostring(short_tp1, "#.####") + ',"tp2":' + str.tostring(short_tp2, "#.####") + ',"tp3":' + str.tostring(short_tp3, "#.####") + ',"time":"' + iso_time + '"}'
+json_sell = '{"token":"' + webhook_token + '","action":"sell","symbol":"' + syminfo.basecurrency + syminfo.currency + '","price":' + str.tostring(close, "#.####") + ',"score":' + str.tostring(int(score_short)) + ',"atr":' + str.tostring(atr, "#.####") + ',"tf_alignment":' + str.tostring(align_short) + ',"leverage":' + str.tostring(leverage) + ',"sl":' + str.tostring(short_sl, "#.####") + ',"tp1":' + str.tostring(short_tp1, "#.####") + ',"tp2":' + str.tostring(short_tp2, "#.####") + ',"tp3":' + str.tostring(short_tp3, "#.####") + ',"time":"' + iso_time + '"}'
 
-json_close_long  = '{"token":"' + webhook_token + '","action":"close_long","symbol":"'  + syminfo.ticker + '","price":' + str.tostring(close, "#.####") + ',"score":' + str.tostring(int(score_short)) + ',"time":"' + iso_time + '"}'
-json_close_short = '{"token":"' + webhook_token + '","action":"close_short","symbol":"' + syminfo.ticker + '","price":' + str.tostring(close, "#.####") + ',"score":' + str.tostring(int(score_long))  + ',"time":"' + iso_time + '"}'
+json_close_long  = '{"token":"' + webhook_token + '","action":"close_long","symbol":"'  + syminfo.basecurrency + syminfo.currency + '","price":' + str.tostring(close, "#.####") + ',"score":' + str.tostring(int(score_short)) + ',"time":"' + iso_time + '"}'
+json_close_short = '{"token":"' + webhook_token + '","action":"close_short","symbol":"' + syminfo.basecurrency + syminfo.currency + '","price":' + str.tostring(close, "#.####") + ',"score":' + str.tostring(int(score_long))  + ',"time":"' + iso_time + '"}'
 
 if long_signal
     alert(json_buy, alert.freq_once_per_bar_close)
