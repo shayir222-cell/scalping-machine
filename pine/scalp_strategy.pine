@@ -38,6 +38,9 @@ mode = input.string("BALANCED", "Mode", options=["AGGRESSIVE", "BALANCED", "SNIP
 // Display
 show_labels = input.bool(true, "Show labels", group="Display")
 
+// Webhook
+webhook_token = input.string("CHANGE_ME", "Webhook token", group="Webhook", tooltip="Must match WEBHOOK_TOKEN in your bot's .env")
+
 // ===========================================================================
 // CORE INDICATORS
 // ===========================================================================
@@ -224,13 +227,17 @@ plot(leverage, "Leverage", display=display.data_window)
 // ===========================================================================
 // ALERT WEBHOOK JSON (BINANCE FORMAT)
 // ===========================================================================
-json_buy = '{"token":"scalper2024","action":"buy","symbol":"' + syminfo.ticker + '","price":' + str.tostring(close, "#.####") + ',"score":' + str.tostring(int(score_long)) + ',"atr":' + str.tostring(atr, "#.####") + ',"tf_alignment":' + str.tostring(align_long) + ',"leverage":' + str.tostring(leverage) + ',"tp1":' + str.tostring(long_tp1, "#.####") + ',"tp2":' + str.tostring(long_tp2, "#.####") + ',"tp3":' + str.tostring(long_tp3, "#.####") + ',"sl":' + str.tostring(long_sl, "#.####") + ',"trail":' + str.tostring(trail_long, "#.####") + '}'
-json_sell = '{"token":"scalper2024","action":"sell","symbol":"' + syminfo.ticker + '","price":' + str.tostring(close, "#.####") + ',"score":' + str.tostring(int(score_short)) + ',"atr":' + str.tostring(atr, "#.####") + ',"tf_alignment":' + str.tostring(align_short) + ',"leverage":' + str.tostring(leverage) + ',"tp1":' + str.tostring(short_tp1, "#.####") + ',"tp2":' + str.tostring(short_tp2, "#.####") + ',"tp3":' + str.tostring(short_tp3, "#.####") + ',"sl":' + str.tostring(short_sl, "#.####") + ',"trail":' + str.tostring(trail_short, "#.####") + '}'
+iso_time = str.format_time(timenow, "yyyy-MM-dd'T'HH:mm:ss'Z'", "UTC")
+
+json_buy = '{"token":"' + webhook_token + '","action":"buy","symbol":"' + syminfo.ticker + '","price":' + str.tostring(close, "#.####") + ',"score":' + str.tostring(int(score_long)) + ',"atr":' + str.tostring(atr, "#.####") + ',"tf_alignment":' + str.tostring(align_long) + ',"leverage":' + str.tostring(leverage) + ',"tp1":' + str.tostring(long_tp1, "#.####") + ',"tp2":' + str.tostring(long_tp2, "#.####") + ',"tp3":' + str.tostring(long_tp3, "#.####") + ',"sl":' + str.tostring(long_sl, "#.####") + ',"trail":' + str.tostring(trail_long, "#.####") + ',"time":"' + iso_time + '"}'
+json_sell = '{"token":"' + webhook_token + '","action":"sell","symbol":"' + syminfo.ticker + '","price":' + str.tostring(close, "#.####") + ',"score":' + str.tostring(int(score_short)) + ',"atr":' + str.tostring(atr, "#.####") + ',"tf_alignment":' + str.tostring(align_short) + ',"leverage":' + str.tostring(leverage) + ',"tp1":' + str.tostring(short_tp1, "#.####") + ',"tp2":' + str.tostring(short_tp2, "#.####") + ',"tp3":' + str.tostring(short_tp3, "#.####") + ',"sl":' + str.tostring(short_sl, "#.####") + ',"trail":' + str.tostring(trail_short, "#.####") + ',"time":"' + iso_time + '"}'
+json_close_long = '{"token":"' + webhook_token + '","action":"close_long","symbol":"' + syminfo.ticker + '","price":' + str.tostring(close, "#.####") + ',"score":' + str.tostring(int(score_short)) + ',"time":"' + iso_time + '"}'
+json_close_short = '{"token":"' + webhook_token + '","action":"close_short","symbol":"' + syminfo.ticker + '","price":' + str.tostring(close, "#.####") + ',"score":' + str.tostring(int(score_long)) + ',"time":"' + iso_time + '"}'
 
 alertcondition(long_signal, title="LONG", message=json_buy)
 alertcondition(short_signal, title="SHORT", message=json_sell)
-alertcondition(close_long, title="CLOSE_LONG", message='{"token":"scalper2024","action":"close_long","symbol":"' + syminfo.ticker + '","price":' + str.tostring(close) + ',"score":' + str.tostring(int(score_short)) + '"}')
-alertcondition(close_short, title="CLOSE_SHORT", message='{"token":"scalper2024","action":"close_short","symbol":"' + syminfo.ticker + '","price":' + str.tostring(close) + ',"score":' + str.tostring(int(score_long)) + '"}')
+alertcondition(close_long, title="CLOSE_LONG", message=json_close_long)
+alertcondition(close_short, title="CLOSE_SHORT", message=json_close_short)
 
 // ===========================================================================
 // BACKTEST MODE
