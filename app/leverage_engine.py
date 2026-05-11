@@ -9,6 +9,9 @@ _TABLES: dict[str, list[tuple[int, int, int]]] = {
     "BNBUSDT":  [(70, 74, 3), (75, 84, 5),  (85, 89, 6),  (90, 100, 7)],
     "XRPUSDT":  [(70, 74, 3), (75, 84, 4),  (85, 89, 5),  (90, 100, 6)],
     "DOGEUSDT": [(70, 74, 3), (75, 84, 4),  (85, 89, 5),  (90, 100, 6)],
+    # SUI: $1.4B daily volume but 13%+ 24h range — keep leverage conservative
+    # to avoid liquidation on a single strong swing
+    "SUIUSDT":  [(70, 74, 3), (75, 84, 4),  (85, 89, 5),  (90, 100, 6)],
 }
 _DEFAULT_TABLE = _TABLES["XRPUSDT"]
 

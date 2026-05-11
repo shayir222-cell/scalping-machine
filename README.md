@@ -93,7 +93,7 @@ Score gate: 70 in AGGRESSIVE mode, 75 in NORMAL, 80 in SAFE. Premium = score ≥
 | ETHUSDT | x4 | x6 | x8 | x10 |
 | SOLUSDT | x3 | x5 | x7 | x8 |
 | BNBUSDT | x3 | x5 | x6 | x7 |
-| XRP/DOGE | x3 | x4 | x5 | x6 |
+| XRP / DOGE / SUI | x3 | x4 | x5 | x6 |
 
 Auto-halved on: 3+ loss streak, daily DD > 3%, chaotic ATR, outside session.
 
