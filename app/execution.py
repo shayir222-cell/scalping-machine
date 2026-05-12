@@ -160,6 +160,19 @@ class BinanceFutures:
         data = await self._get("/fapi/v2/positionRisk")
         return [p for p in data if abs(float(p["positionAmt"])) > 0]
 
+    async def get_user_trades(self, symbol: str, limit: int = 20) -> list[dict]:
+        """Recent fills for a symbol. Used to reconstruct exit price after
+        a position closes on Binance side (SL/TP fired)."""
+        try:
+            data = await self._get("/fapi/v1/userTrades", {
+                "symbol": symbol,
+                "limit": str(limit),
+            })
+            return data if isinstance(data, list) else []
+        except Exception as e:
+            logger.warning(f"get_user_trades {symbol}: {e}")
+            return []
+
     # ─────────────────────────────────────────────
     # Configuration
     # ─────────────────────────────────────────────

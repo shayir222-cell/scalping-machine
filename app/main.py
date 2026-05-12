@@ -126,10 +126,18 @@ async def lifespan(app: FastAPI):
     # Inject state into Telegram
     tg.inject_state(state)
     tg_task = asyncio.create_task(tg.start_polling())
-    
-    # Start TP monitor (move SL to breakeven after TP1 fills)
+
+    # Startup reconcile: any "open" trade in DB whose Binance position no
+    # longer exists must be closed-and-priced from recent fills.
+    if state.get("running"):
+        try:
+            await _reconcile_orphaned_db_trades()
+        except Exception as e:
+            logger.warning(f"Startup reconcile failed: {e}")
+
+    # Start TP monitor (move SL to breakeven after TP1 fills + position sync)
     monitor_task = asyncio.create_task(_monitor_tp_fills())
-    
+
     # Start optimizer (analyze every 72h)
     optimizer_task = asyncio.create_task(_run_optimizer())
 
@@ -146,8 +154,133 @@ async def lifespan(app: FastAPI):
 # Background: Monitor TP fills and move SL
 # ─────────────────────────────────────────────
 
+async def _reconcile_orphaned_db_trades() -> None:
+    """On startup, any DB row with status='open' whose Binance position is
+    gone is reconstructed in-memory and reconciled. Anything still open on
+    Binance is re-loaded into the open_trades dict."""
+    from sqlalchemy import select
+    async with SessionLocal() as db:
+        result = await db.execute(select(DbTrade).where(DbTrade.status == "open"))
+        rows = result.scalars().all()
+
+    if not rows:
+        return
+
+    logger.info(f"Startup reconcile: {len(rows)} open DB rows to verify")
+    for row in rows:
+        try:
+            pos = await execution.get_position(row.symbol)
+        except Exception as e:
+            logger.warning(f"Startup reconcile {row.symbol}: position fetch failed: {e}")
+            continue
+
+        # Rebuild TradeState from DB row regardless — we need it for either path
+        ts = TradeState()
+        ts.symbol      = row.symbol
+        ts.side        = row.side
+        ts.score       = int(row.score or 0)
+        ts.leverage    = int(row.leverage or 1)
+        ts.risk_pct    = float(row.risk_pct or 0.0)
+        ts.entry_price = float(row.entry_price or 0.0)
+        ts.quantity    = float(row.quantity or 0.0)
+        ts.remaining_qty = float(row.quantity or 0.0)
+        ts.sl_price    = float(row.sl_price or 0.0)
+        ts.tp1_price   = float(row.tp1_price or 0.0)
+        ts.tp2_price   = float(row.tp2_price or 0.0)
+        ts.tp3_price   = float(row.tp3_price or 0.0)
+        ts.opened_at   = row.opened_at
+        ts.session     = row.session or ""
+        ts.db_id       = row.id
+
+        if pos is None:
+            # Position is gone — reconcile from fills
+            await _reconcile_closed_position(row.symbol, ts)
+        else:
+            # Still open on Binance — repopulate in-memory tracking
+            open_trades[row.symbol] = ts
+            logger.info(f"Restored open trade in memory: {row.symbol} {row.side}")
+
+
+async def _reconcile_closed_position(symbol: str, trade: TradeState) -> None:
+    """Bot thought position was open but Binance reports it gone — SL or TP
+    must have fired. Pull recent fills to figure out exit price + pnl, then
+    update DB and notify Telegram."""
+    try:
+        fills = await execution.get_user_trades(symbol, limit=20)
+    except Exception as e:
+        logger.error(f"Reconcile {symbol}: fills fetch failed: {e}")
+        return
+
+    closing_side = "SELL" if trade.side == "LONG" else "BUY"
+    opened_ms = int(trade.opened_at.timestamp() * 1000) if trade.opened_at else 0
+    # Fills are timestamped; keep only those AFTER our entry and on the closing side
+    close_fills = [
+        f for f in fills
+        if f.get("side") == closing_side
+        and int(f.get("time", 0)) >= opened_ms
+    ]
+    if not close_fills:
+        logger.warning(f"Reconcile {symbol}: no matching close fill yet, will retry next tick")
+        return
+
+    # qty-weighted exit price across all close fills (handles partial TP1 + SL on remainder)
+    total_qty = sum(float(f.get("qty", 0)) for f in close_fills)
+    total_notional = sum(float(f.get("qty", 0)) * float(f.get("price", 0)) for f in close_fills)
+    exit_price = total_notional / total_qty if total_qty > 0 else 0.0
+    if exit_price <= 0:
+        logger.warning(f"Reconcile {symbol}: bad exit price, skipping")
+        return
+
+    now = datetime.now(UTC)
+    hold_sec = int((now - trade.opened_at).total_seconds()) if trade.opened_at else 0
+    pnl_gross = (exit_price - trade.entry_price) * trade.quantity * (1 if trade.side == "LONG" else -1)
+    # Use Binance-reported fees if present, else estimate
+    fees = sum(float(f.get("commission", 0)) for f in close_fills if f.get("commissionAsset") == "USDT")
+    if fees == 0:
+        fees = execution.estimate_fees(trade.entry_price * trade.quantity, n_orders=2)
+    net_pnl = pnl_gross - fees
+    notional_margin = trade.entry_price * trade.quantity / max(trade.leverage, 1)
+    pnl_pct = (net_pnl / notional_margin * 100) if notional_margin > 0 else 0.0
+
+    is_win = net_pnl > 0
+    risk_engine.record_result(is_win)
+    get_pair_ranking().record_trade_result(symbol, is_win, net_pnl)
+
+    if trade.side == "LONG":
+        exit_reason = "tp_hit" if exit_price > trade.entry_price else "sl_hit"
+    else:
+        exit_reason = "tp_hit" if exit_price < trade.entry_price else "sl_hit"
+
+    async with SessionLocal() as db:
+        from sqlalchemy import select
+        result = await db.execute(select(DbTrade).where(DbTrade.id == trade.db_id))
+        db_trade = result.scalar_one_or_none()
+        if db_trade:
+            db_trade.exit_price = exit_price
+            db_trade.pnl_usdt = net_pnl
+            db_trade.pnl_pct = pnl_pct
+            db_trade.fees_usdt = fees
+            db_trade.hold_time_sec = hold_sec
+            db_trade.exit_reason = exit_reason
+            db_trade.status = "closed"
+            db_trade.closed_at = now
+            await db.commit()
+
+    if is_win:
+        await tg.alert_tp_hit(symbol, trade.side, 2, exit_price, net_pnl)
+    else:
+        await tg.alert_sl_hit(symbol, trade.side, exit_price, net_pnl)
+
+    open_trades.pop(symbol, None)
+    logger.info(
+        f"Reconciled {symbol}: exit={exit_price:.4f} pnl={net_pnl:+.4f} "
+        f"({pnl_pct:+.2f}%) reason={exit_reason} hold={hold_sec}s"
+    )
+
+
 async def _monitor_tp_fills() -> None:
-    """Check every 10s if TP1 was filled, then move SL to breakeven."""
+    """Every 10s: (1) detect Binance-side closure of any tracked position,
+    (2) on TP1 fill, move SL to breakeven."""
     while True:
         try:
             if not state.get("running"):
@@ -155,13 +288,27 @@ async def _monitor_tp_fills() -> None:
                 continue
 
             for symbol, trade in list(open_trades.items()):
+                # (1) Position-sync: did Binance close it (SL/TP fired)?
+                try:
+                    pos = await execution.get_position(symbol)
+                except Exception as e:
+                    logger.warning(f"position check {symbol}: {e}")
+                    pos = "unknown"
+                if pos is None:
+                    await _reconcile_closed_position(symbol, trade)
+                    continue   # already removed from open_trades
+
+                # (2) TP1 → breakeven (legacy behaviour)
                 if not trade.tp1_filled:
                     filled = await execution.check_tp1_filled(symbol)
                     if filled:
                         trade.tp1_filled = True
-                        await execution.move_sl_to_breakeven(
-                            symbol, trade.side, trade.entry_price
-                        )
+                        try:
+                            await execution.move_sl_to_breakeven(
+                                symbol, trade.side, trade.entry_price
+                            )
+                        except Exception as e:
+                            logger.warning(f"move SL to BE {symbol}: {e}")
                         logger.info(f"{symbol} TP1 filled → SL moved to BE")
                         await tg.alert_tp_filled(symbol, "TP1", trade.entry_price)
 
