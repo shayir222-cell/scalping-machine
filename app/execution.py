@@ -220,16 +220,18 @@ class BinanceFutures:
     async def place_sl(
         self, symbol: str, side: str, qty: float, sl_price: float
     ) -> dict:
-        """Stop-loss: market order triggered at sl_price."""
+        """Stop-loss via the new Algo Order endpoint (Binance migrated all
+        conditional orders off /fapi/v1/order on 2025-12-09)."""
         info = await self.load_instrument(symbol)
         sz = self._qty(qty, info["step_size"], info["min_qty"])
         px = self._px(sl_price, info["tick_size"])
-        data = await self._post("/fapi/v1/order", {
+        data = await self._post("/fapi/v1/algoOrder", {
+            "algoType": "CONDITIONAL",
             "symbol": symbol,
             "side": side.upper(),
             "type": "STOP_MARKET",
             "quantity": sz,
-            "stopPrice": px,
+            "triggerPrice": px,
             "reduceOnly": "true",
         })
         return data
@@ -237,27 +239,54 @@ class BinanceFutures:
     async def place_tp(
         self, symbol: str, side: str, qty: float, tp_price: float
     ) -> dict:
-        """Take-profit: market order triggered at tp_price."""
+        """Take-profit via the new Algo Order endpoint."""
         info = await self.load_instrument(symbol)
         sz = self._qty(qty, info["step_size"], info["min_qty"])
         px = self._px(tp_price, info["tick_size"])
-        data = await self._post("/fapi/v1/order", {
+        data = await self._post("/fapi/v1/algoOrder", {
+            "algoType": "CONDITIONAL",
             "symbol": symbol,
             "side": side.upper(),
             "type": "TAKE_PROFIT_MARKET",
             "quantity": sz,
-            "stopPrice": px,
+            "triggerPrice": px,
             "reduceOnly": "true",
         })
         return data
 
-    async def cancel_all_orders(self, symbol: str) -> None:
+    async def get_open_algo_orders(self, symbol: str) -> list[dict]:
+        """List open conditional/algo orders for a symbol (SL + TP)."""
         try:
-            await self._delete("/fapi/v1/allOpenOrders", {
-                "symbol": symbol,
-            })
+            data = await self._get("/fapi/v1/openAlgoOrders", {"symbol": symbol})
+            if isinstance(data, dict) and "orders" in data:
+                return data["orders"]
+            return data if isinstance(data, list) else []
         except Exception as e:
-            logger.warning(f"cancel all {symbol}: {e}")
+            logger.warning(f"get_open_algo_orders {symbol}: {e}")
+            return []
+
+    async def cancel_all_orders(self, symbol: str) -> None:
+        # Cancel regular pending orders (limit entries, etc.)
+        try:
+            await self._delete("/fapi/v1/allOpenOrders", {"symbol": symbol})
+        except Exception as e:
+            logger.warning(f"cancel regular {symbol}: {e}")
+        # Cancel each open algo order (SL/TP) individually
+        try:
+            algo_orders = await self.get_open_algo_orders(symbol)
+            for ao in algo_orders:
+                algo_id = ao.get("algoId") or ao.get("orderId")
+                if not algo_id:
+                    continue
+                try:
+                    await self._delete("/fapi/v1/algoOrder", {
+                        "symbol": symbol,
+                        "algoId": str(algo_id),
+                    })
+                except Exception as e:
+                    logger.warning(f"cancel algo {symbol} #{algo_id}: {e}")
+        except Exception as e:
+            logger.warning(f"cancel algo batch {symbol}: {e}")
 
     # ─────────────────────────────────────────────
     # High-level: open / manage / close
@@ -321,11 +350,12 @@ class BinanceFutures:
             return []
 
     async def check_tp1_filled(self, symbol: str) -> bool:
-        """Check if first TP (40%) was filled."""
+        """Check if first TP (40%) was filled. TPs now live in the algo
+        orders endpoint, not the regular /openOrders."""
         try:
-            orders = await self.get_open_orders(symbol)
+            orders = await self.get_open_algo_orders(symbol)
             tp_orders = [o for o in orders if o.get("type") == "TAKE_PROFIT_MARKET"]
-            # If only 1 TP order left, likely TP1 was filled
+            # We open with 2 TPs; if only 1 remains, TP1 has filled.
             return len(tp_orders) <= 1
         except Exception as e:
             logger.warning(f"check_tp1_filled {symbol}: {e}")
