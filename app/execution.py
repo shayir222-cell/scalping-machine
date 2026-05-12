@@ -35,7 +35,11 @@ class BinanceFutures:
     # ─────────────────────────────────────────────
 
     def _sign(self, params: dict) -> str:
-        query = "&".join(f"{k}={v}" for k, v in sorted(params.items()))
+        # IMPORTANT: do NOT sort. httpx sends params in dict-insertion order,
+        # so the signature must be computed over the same order. Sorting here
+        # would diverge from the actual URL query string Binance sees,
+        # causing -1022 "Signature for this request is not valid".
+        query = "&".join(f"{k}={v}" for k, v in params.items())
         return hmac.new(self._secret, query.encode(), hashlib.sha256).hexdigest()
 
     def _headers(self) -> dict:
