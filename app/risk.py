@@ -17,6 +17,9 @@ class RiskEngine:
         self.paused_until: Optional[datetime] = None
         self._warned_3: bool = False
         self._warned_4: bool = False
+        # Weekly DD tracking (ISO week, resets on Monday 00:00 UTC)
+        self.week_start_equity: float = 0.0
+        self.week_start: Optional[datetime] = None
 
     # ──────────────────────────────────────────────
     # Equity helpers
@@ -32,6 +35,11 @@ class RiskEngine:
             return 0.0
         return (true_eq - self.day_start_equity) / self.day_start_equity * 100.0
 
+    def weekly_dd_pct(self, true_eq: float) -> float:
+        if self.week_start_equity <= 0:
+            return 0.0
+        return (true_eq - self.week_start_equity) / self.week_start_equity * 100.0
+
     def new_day(self, equity: float) -> None:
         self.day_start_equity = equity
         self.peak_equity = equity
@@ -41,6 +49,14 @@ class RiskEngine:
         self.loss_streak = 0
         self.win_streak = 0
         self.paused_until = None
+        # Rotate the week if we crossed Monday
+        now = datetime.now(UTC)
+        if (self.week_start is None
+            or (now - self.week_start).days >= 7
+            or now.weekday() == 0):  # Monday rollover
+            self.week_start_equity = equity
+            self.week_start = now
+            logger.info(f"New week started. Equity: ${equity:.2f}")
         logger.info(f"New day started. Equity: ${equity:.2f}")
 
     # ──────────────────────────────────────────────
@@ -49,9 +65,12 @@ class RiskEngine:
 
     def can_trade(self, true_eq: float) -> tuple[bool, str]:
         dd = self.daily_dd_pct(true_eq)
+        wdd = self.weekly_dd_pct(true_eq)
 
         if dd <= -5.0:
             return False, f"Daily stop hit: {dd:.2f}% ≤ -5%"
+        if wdd <= -10.0:
+            return False, f"Weekly stop hit: {wdd:.2f}% ≤ -10%"
 
         now = datetime.now(UTC)
         if self.paused_until and now < self.paused_until:
@@ -65,6 +84,8 @@ class RiskEngine:
         elif dd <= -3.0 and not self._warned_3:
             self._warned_3 = True
             warnings.append("⚠️ WARNING: -3% daily DD")
+        if wdd <= -7.0:
+            warnings.append(f"⚠️ Weekly DD {wdd:.1f}%")
 
         return True, " | ".join(warnings)
 

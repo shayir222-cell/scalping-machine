@@ -141,8 +141,12 @@ async def lifespan(app: FastAPI):
     # Start optimizer (analyze every 72h)
     optimizer_task = asyncio.create_task(_run_optimizer())
 
+    # Start daily report task (sends summary at 09:00 UTC)
+    daily_report_task = asyncio.create_task(_send_daily_report())
+
     yield  # app running
 
+    daily_report_task.cancel()
     optimizer_task.cancel()
     monitor_task.cancel()
     tg_task.cancel()
@@ -333,6 +337,70 @@ async def _monitor_tp_fills() -> None:
         except Exception as e:
             logger.warning(f"TP monitor error: {e}")
             await asyncio.sleep(10)
+
+
+async def _send_daily_report() -> None:
+    """Once a day (09:00 UTC), send a PnL summary of the last 24 hours
+    to Telegram."""
+    from sqlalchemy import select, func
+    while True:
+        try:
+            # Sleep until next 09:00 UTC
+            now = datetime.now(UTC)
+            target = now.replace(hour=9, minute=0, second=0, microsecond=0)
+            if target <= now:
+                target = target + timedelta(days=1)
+            wait_sec = (target - now).total_seconds()
+            await asyncio.sleep(wait_sec)
+
+            # Pull last 24h closed trades
+            cutoff = datetime.now(UTC) - timedelta(hours=24)
+            async with SessionLocal() as db:
+                result = await db.execute(
+                    select(DbTrade).where(
+                        DbTrade.status == "closed",
+                        DbTrade.closed_at >= cutoff,
+                    )
+                )
+                trades = result.scalars().all()
+
+            if not trades:
+                await tg._send("📊 <b>Daily report</b>\nNo trades closed in the last 24h.")
+                continue
+
+            n = len(trades)
+            wins = sum(1 for t in trades if (t.pnl_usdt or 0) > 0)
+            losses = n - wins
+            wr = (wins / n * 100) if n else 0
+            pnl = sum(float(t.pnl_usdt or 0) for t in trades)
+            fees = sum(float(t.fees_usdt or 0) for t in trades)
+
+            # Per-symbol PnL
+            by_sym: dict[str, float] = {}
+            for t in trades:
+                by_sym[t.symbol] = by_sym.get(t.symbol, 0.0) + float(t.pnl_usdt or 0)
+            best = max(by_sym.items(), key=lambda x: x[1]) if by_sym else None
+            worst = min(by_sym.items(), key=lambda x: x[1]) if by_sym else None
+
+            wb, upnl = await execution.get_balance_usdt()
+            eq = risk_engine.true_equity(wb, upnl)
+            dd_d = risk_engine.daily_dd_pct(eq)
+            dd_w = risk_engine.weekly_dd_pct(eq)
+
+            msg = (
+                f"📊 <b>Daily report</b>\n"
+                f"Trades: <b>{n}</b> ({wins}W / {losses}L, WR <b>{wr:.0f}%</b>)\n"
+                f"PnL 24h: <b>{pnl:+.4f} USDT</b>\n"
+                f"Fees: {fees:.4f} USDT\n"
+                f"Best: {best[0]} {best[1]:+.4f}\n"
+                f"Worst: {worst[0]} {worst[1]:+.4f}\n"
+                f"Equity: ${eq:.2f}  (day {dd_d:+.2f}% / week {dd_w:+.2f}%)"
+            )
+            await tg._send(msg)
+            logger.info(f"Daily report sent: {n} trades, WR {wr:.0f}%, PnL {pnl:+.4f}")
+        except Exception as e:
+            logger.warning(f"Daily report error: {e}")
+            await asyncio.sleep(3600)
 
 
 async def _run_optimizer() -> None:
