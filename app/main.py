@@ -154,6 +154,16 @@ async def lifespan(app: FastAPI):
 # Background: Monitor TP fills and move SL
 # ─────────────────────────────────────────────
 
+def _to_utc(dt):
+    """SQLite returns naive datetimes even on DateTime(timezone=True) cols.
+    Coerce to UTC-aware so arithmetic with datetime.now(UTC) doesn't blow up."""
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=UTC)
+    return dt
+
+
 async def _reconcile_orphaned_db_trades() -> None:
     """On startup, any DB row with status='open' whose Binance position is
     gone is reconstructed in-memory and reconciled. Anything still open on
@@ -188,7 +198,7 @@ async def _reconcile_orphaned_db_trades() -> None:
         ts.tp1_price   = float(row.tp1_price or 0.0)
         ts.tp2_price   = float(row.tp2_price or 0.0)
         ts.tp3_price   = float(row.tp3_price or 0.0)
-        ts.opened_at   = row.opened_at
+        ts.opened_at   = _to_utc(row.opened_at)
         ts.session     = row.session or ""
         ts.db_id       = row.id
 
@@ -212,7 +222,8 @@ async def _reconcile_closed_position(symbol: str, trade: TradeState) -> None:
         return
 
     closing_side = "SELL" if trade.side == "LONG" else "BUY"
-    opened_ms = int(trade.opened_at.timestamp() * 1000) if trade.opened_at else 0
+    opened_at = _to_utc(trade.opened_at)
+    opened_ms = int(opened_at.timestamp() * 1000) if opened_at else 0
     # Fills are timestamped; keep only those AFTER our entry and on the closing side
     close_fills = [
         f for f in fills
@@ -232,7 +243,7 @@ async def _reconcile_closed_position(symbol: str, trade: TradeState) -> None:
         return
 
     now = datetime.now(UTC)
-    hold_sec = int((now - trade.opened_at).total_seconds()) if trade.opened_at else 0
+    hold_sec = int((now - opened_at).total_seconds()) if opened_at else 0
     pnl_gross = (exit_price - trade.entry_price) * trade.quantity * (1 if trade.side == "LONG" else -1)
     # Use Binance-reported fees if present, else estimate
     fees = sum(float(f.get("commission", 0)) for f in close_fills if f.get("commissionAsset") == "USDT")
@@ -279,8 +290,9 @@ async def _reconcile_closed_position(symbol: str, trade: TradeState) -> None:
 
 
 async def _monitor_tp_fills() -> None:
-    """Every 10s: (1) detect Binance-side closure of any tracked position,
-    (2) on TP1 fill, move SL to breakeven."""
+    """Every 10s: (1) reconcile if Binance closed the position behind our
+    back, (2) detect TP1 fill by comparing current Binance position size
+    to the originally tracked qty — authoritative, no order-listing parse."""
     while True:
         try:
             if not state.get("running"):
@@ -288,20 +300,22 @@ async def _monitor_tp_fills() -> None:
                 continue
 
             for symbol, trade in list(open_trades.items()):
-                # (1) Position-sync: did Binance close it (SL/TP fired)?
                 try:
                     pos = await execution.get_position(symbol)
                 except Exception as e:
                     logger.warning(f"position check {symbol}: {e}")
-                    pos = "unknown"
-                if pos is None:
-                    await _reconcile_closed_position(symbol, trade)
-                    continue   # already removed from open_trades
+                    continue
 
-                # (2) TP1 → breakeven (legacy behaviour)
-                if not trade.tp1_filled:
-                    filled = await execution.check_tp1_filled(symbol)
-                    if filled:
+                if pos is None:
+                    # Fully closed — SL or TP2 fired, or manual close on Binance
+                    await _reconcile_closed_position(symbol, trade)
+                    continue
+
+                # TP1 detection: position shrunk vs originally opened qty
+                if not trade.tp1_filled and trade.quantity > 0:
+                    current_qty = abs(float(pos.get("positionAmt", 0)))
+                    # 40% TP1 leaves ~60% of original; we trigger on >5% decrease
+                    if current_qty < trade.quantity * 0.95:
                         trade.tp1_filled = True
                         try:
                             await execution.move_sl_to_breakeven(
@@ -309,7 +323,10 @@ async def _monitor_tp_fills() -> None:
                             )
                         except Exception as e:
                             logger.warning(f"move SL to BE {symbol}: {e}")
-                        logger.info(f"{symbol} TP1 filled → SL moved to BE")
+                        logger.info(
+                            f"{symbol} TP1 filled (qty {trade.quantity}→{current_qty}) "
+                            f"→ SL moved to BE"
+                        )
                         await tg.alert_tp_filled(symbol, "TP1", trade.entry_price)
 
             await asyncio.sleep(10)
