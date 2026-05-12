@@ -1,19 +1,34 @@
-from dataclasses import dataclass, field
+"""
+Leverage engine — Variant B: leverage decoupled from score.
+
+Each pair has a single max-safe leverage chosen so that the bot's ATR-based
+stop-loss (~0.3–0.7% of entry) sits comfortably inside Binance's
+liquidation distance (1 / leverage). We keep a ≥5× safety margin: at
+max=20× the liq distance is 5% — vs a typical SL of 0.4–1% that gives
+plenty of room for a wick before liquidation triggers.
+
+Score no longer affects leverage. It only scales `risk_pct` in risk.py
+(1.0% → 1.25% at score≥85 → 1.5% at score≥90).
+
+Auto-reductions still apply: loss streak, daily drawdown, chaotic ATR,
+out-of-session, safe mode — each halves leverage. Aggressive mode adds
+nothing extra (we're already at max).
+"""
+from dataclasses import dataclass
 
 
-# [score_min, score_max] → leverage
-_TABLES: dict[str, list[tuple[int, int, int]]] = {
-    "BTCUSDT":  [(70, 74, 4), (75, 84, 7),  (85, 89, 10), (90, 100, 12)],
-    "ETHUSDT":  [(70, 74, 4), (75, 84, 6),  (85, 89, 8),  (90, 100, 10)],
-    "SOLUSDT":  [(70, 74, 3), (75, 84, 5),  (85, 89, 7),  (90, 100, 8)],
-    "BNBUSDT":  [(70, 74, 3), (75, 84, 5),  (85, 89, 6),  (90, 100, 7)],
-    "XRPUSDT":  [(70, 74, 3), (75, 84, 4),  (85, 89, 5),  (90, 100, 6)],
-    "DOGEUSDT": [(70, 74, 3), (75, 84, 4),  (85, 89, 5),  (90, 100, 6)],
-    # SUI: $1.4B daily volume but 13%+ 24h range — keep leverage conservative
-    # to avoid liquidation on a single strong swing
-    "SUIUSDT":  [(70, 74, 3), (75, 84, 4),  (85, 89, 5),  (90, 100, 6)],
+# Safe max leverage per symbol. Calibrated so liq_distance / typical_sl_distance >= 5.
+# Volatile pairs get lower caps; majors (BTC/ETH) higher.
+_MAX_LEV: dict[str, int] = {
+    "BTCUSDT":      25,
+    "ETHUSDT":      20,
+    "SOLUSDT":      15,
+    "BNBUSDT":      15,
+    "XRPUSDT":      12,
+    "DOGEUSDT":     12,
+    "SUIUSDT":      10,
 }
-_DEFAULT_TABLE = _TABLES["XRPUSDT"]
+_DEFAULT_MAX = 8  # unknown symbol — conservative
 
 
 @dataclass
@@ -29,12 +44,8 @@ class MarketState:
     mode: str = "normal"   # normal | aggressive | safe
 
 
-def _base_leverage(symbol: str, score: int) -> int:
-    table = _TABLES.get(symbol, _DEFAULT_TABLE)
-    for lo, hi, lev in table:
-        if lo <= score <= hi:
-            return lev
-    return 3
+def _max_for(symbol: str) -> int:
+    return _MAX_LEV.get(symbol, _DEFAULT_MAX)
 
 
 def _should_reduce(s: MarketState) -> bool:
@@ -49,36 +60,26 @@ def _should_reduce(s: MarketState) -> bool:
     )
 
 
-def _can_max(s: MarketState) -> bool:
-    return (
-        s.score >= 90
-        and s.tf_alignment == 4
-        and not _should_reduce(s)
-        and s.mode in ("normal", "aggressive")
-    )
-
-
 def get_leverage(symbol: str, state: MarketState) -> int:
-    base = _base_leverage(symbol, state.score)
-
-    if state.mode == "safe":
-        return max(2, base // 2)
-
+    base = _max_for(symbol)
     if _should_reduce(state):
-        lev = max(2, base // 2)
-        return lev
-
-    if _can_max(state) or state.mode == "aggressive":
-        table = _TABLES.get(symbol, _DEFAULT_TABLE)
-        return table[-1][2]  # top bracket
-
+        return max(2, base // 2)
     return base
 
 
 def leverage_note(symbol: str, state: MarketState) -> str:
     lev = get_leverage(symbol, state)
     if _should_reduce(state):
-        return f"x{lev} (REDUCED — streak={state.loss_streak}, dd={state.daily_dd_pct:.1f}%)"
-    if _can_max(state):
-        return f"x{lev} (MAX — score={state.score}, 4TF)"
+        reasons = []
+        if state.loss_streak >= 2:
+            reasons.append(f"streak={state.loss_streak}")
+        if state.daily_dd_pct <= -3.0:
+            reasons.append(f"dd={state.daily_dd_pct:.1f}%")
+        if state.mode == "safe":
+            reasons.append("safe")
+        if state.atr_chaotic:
+            reasons.append("atr_chaotic")
+        if state.outside_session:
+            reasons.append("off_session")
+        return f"x{lev} (REDUCED — {', '.join(reasons)})"
     return f"x{lev}"

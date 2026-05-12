@@ -85,17 +85,25 @@ Use a 5M chart on a supported pair (BTCUSDT, ETHUSDT, SOLUSDT, BNBUSDT, XRPUSDT,
 
 Score gate: 70 in AGGRESSIVE mode, 75 in NORMAL, 80 in SAFE. Premium = score ≥ 90.
 
-## Dynamic leverage
+## Leverage
 
-| Symbol | 70-74 | 75-84 | 85-89 | 90+ |
-|---|---|---|---|---|
-| BTCUSDT | x4 | x7 | x10 | x12 |
-| ETHUSDT | x4 | x6 | x8 | x10 |
-| SOLUSDT | x3 | x5 | x7 | x8 |
-| BNBUSDT | x3 | x5 | x6 | x7 |
-| XRP / DOGE / SUI | x3 | x4 | x5 | x6 |
+Leverage is **per-pair fixed** at a safe max — chosen so Binance's
+liquidation distance (≈ 1/leverage) sits at least 5× outside the
+ATR-based stop-loss. The trading score affects only `risk_pct`, not
+leverage.
 
-Auto-halved on: 3+ loss streak, daily DD > 3%, chaotic ATR, outside session.
+| Symbol | Max leverage | Notes |
+|---|---|---|
+| BTCUSDT | x25 | Liq ≈ 4%, SL ≈ 0.4% |
+| ETHUSDT | x20 | |
+| SOLUSDT | x15 | |
+| BNBUSDT | x15 | |
+| XRPUSDT | x12 | |
+| DOGEUSDT | x12 | |
+| SUIUSDT | x10 | Wider 24h range |
+
+Auto-halved on: 2+ loss streak, daily DD ≤ −3%, chaotic ATR, outside
+session, or `/safe` mode.
 
 ## Risk rules
 
