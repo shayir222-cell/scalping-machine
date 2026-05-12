@@ -454,6 +454,80 @@ async def _process_signal(signal: WebhookSignal, sig_id: int) -> None:
                                         "Already in trade on this symbol")
         return
 
+    # ── Pair-correlation guard ──
+    # BTC/ETH/SOL move together (~0.85). Holding any of them already
+    # plus a new same-direction signal on another → halve risk_pct.
+    side_dir = "LONG" if signal.action == "buy" else "SHORT"
+    correlated_majors = {"BTCUSDT", "ETHUSDT", "SOLUSDT"}
+    if signal.symbol in correlated_majors:
+        same_dir_correlated = [
+            s for s, t in open_trades.items()
+            if s in correlated_majors and s != signal.symbol and t.side == side_dir
+        ]
+        if same_dir_correlated:
+            logger.info(
+                f"Correlation guard: {signal.symbol} {side_dir} while holding "
+                f"{same_dir_correlated} same-side → halving risk"
+            )
+            correlation_penalty = 0.5
+        else:
+            correlation_penalty = 1.0
+    else:
+        correlation_penalty = 1.0
+
+    # ── Order book + OI confirmation (final entry filter) ──
+    # For LONG we want bid-side ≥ 48% (not aggressively dominated by asks)
+    # and OI not dropping >2% in last 5m. Reject if it's clearly against us.
+    imbalance = await execution.get_order_book_imbalance(signal.symbol, depth=20)
+    if imbalance is not None:
+        if side_dir == "LONG" and imbalance < 0.45:
+            await tg.alert_signal_rejected(
+                signal.symbol, signal.action, signal.score,
+                f"Order book against us (bid share {imbalance:.2f})"
+            )
+            return
+        if side_dir == "SHORT" and imbalance > 0.55:
+            await tg.alert_signal_rejected(
+                signal.symbol, signal.action, signal.score,
+                f"Order book against us (bid share {imbalance:.2f})"
+            )
+            return
+
+    oi_delta = await execution.get_oi_change_pct(signal.symbol, period="5m")
+    if oi_delta is not None:
+        # Aggressive OI drop while we want to go long → smart money exiting
+        if side_dir == "LONG" and oi_delta < -2.0:
+            await tg.alert_signal_rejected(
+                signal.symbol, signal.action, signal.score,
+                f"OI dropping {oi_delta:.1f}% in 5m"
+            )
+            return
+        if side_dir == "SHORT" and oi_delta > 2.0:
+            await tg.alert_signal_rejected(
+                signal.symbol, signal.action, signal.score,
+                f"OI rising {oi_delta:.1f}% in 5m"
+            )
+            return
+
+    # ── Funding rate guard: skip if extreme against us ──
+    # Funding paid by losing side every 8h. Rate > +0.05% for LONG = paying a lot.
+    fr = await execution.get_funding_rate(signal.symbol)
+    if fr is not None:
+        rate = fr["rate"]
+        # For LONG: positive rate = longs pay shorts; >0.05% means crowded long
+        if side_dir == "LONG" and rate > 0.0005:
+            await tg.alert_signal_rejected(
+                signal.symbol, signal.action, signal.score,
+                f"Funding too high ({rate*100:+.3f}%) — crowded long"
+            )
+            return
+        if side_dir == "SHORT" and rate < -0.0005:
+            await tg.alert_signal_rejected(
+                signal.symbol, signal.action, signal.score,
+                f"Funding too negative ({rate*100:+.3f}%) — crowded short"
+            )
+            return
+
     # ── Build market state ──
     ms = MarketState(
         score=signal.score,
@@ -465,7 +539,7 @@ async def _process_signal(signal: WebhookSignal, sig_id: int) -> None:
 
     leverage = get_leverage(signal.symbol, ms)
     lev_note = leverage_note(signal.symbol, ms)
-    risk_pct = risk_engine.risk_pct(signal.score, mode)
+    risk_pct = risk_engine.risk_pct(signal.score, mode) * correlation_penalty
 
     # ── ATR / SL ──
     atr = signal.atr
@@ -494,8 +568,11 @@ async def _process_signal(signal: WebhookSignal, sig_id: int) -> None:
     if signal.score >= 90 and (signal.tf_alignment or 0) >= 4:
         await tg.alert_premium_setup(signal.symbol, side, signal.score)
 
-    # ── Order type: limit (maker 0.02%) for score<90, market for premium ──
-    # Limit offset: 0.05% inside the spread to get filled quickly
+    # ── Order type: post-only limit (GTX, maker fee 0.02%) for score<90 ──
+    # Limit posted 0.05% inside the BBO so it sits as maker, gets filled
+    # within the next minute if price comes back. Binance REJECTS the
+    # order if it would match immediately → guarantees maker pricing.
+    # Premium setups (score≥90) and aggressive mode still use market.
     use_limit   = signal.score < 90 and mode != BotMode.AGGRESSIVE
     limit_price = None
     if use_limit:

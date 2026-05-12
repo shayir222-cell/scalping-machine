@@ -173,6 +173,72 @@ class BinanceFutures:
             logger.warning(f"get_user_trades {symbol}: {e}")
             return []
 
+    # ─── Public market microstructure (no auth needed) ───────────
+
+    async def get_order_book_imbalance(self, symbol: str, depth: int = 20) -> float | None:
+        """Bid-side share of total top-N book qty. >0.5 = bids dominate (bullish),
+        <0.5 = asks dominate (bearish). Returns None on failure."""
+        try:
+            r = await self._http.get("/fapi/v1/depth", params={"symbol": symbol, "limit": str(depth)})
+            r.raise_for_status()
+            data = r.json()
+            bid_qty = sum(float(b[1]) for b in data.get("bids", []))
+            ask_qty = sum(float(a[1]) for a in data.get("asks", []))
+            total = bid_qty + ask_qty
+            if total <= 0:
+                return None
+            return bid_qty / total
+        except Exception as e:
+            logger.warning(f"get_order_book_imbalance {symbol}: {e}")
+            return None
+
+    async def get_open_interest(self, symbol: str) -> float | None:
+        """Current open interest (in contract units). Returns None on failure."""
+        try:
+            r = await self._http.get("/fapi/v1/openInterest", params={"symbol": symbol})
+            r.raise_for_status()
+            return float(r.json().get("openInterest", 0))
+        except Exception as e:
+            logger.warning(f"get_open_interest {symbol}: {e}")
+            return None
+
+    async def get_oi_change_pct(self, symbol: str, period: str = "5m") -> float | None:
+        """5-min open-interest delta as a percent (positive = OI growing).
+        Period: '5m', '15m', '30m', '1h', '2h', '4h', '6h', '12h', '1d'."""
+        try:
+            r = await self._http.get(
+                "/futures/data/openInterestHist",
+                params={"symbol": symbol, "period": period, "limit": "2"},
+            )
+            r.raise_for_status()
+            data = r.json()
+            if not isinstance(data, list) or len(data) < 2:
+                return None
+            old_oi = float(data[0].get("sumOpenInterest", 0))
+            new_oi = float(data[-1].get("sumOpenInterest", 0))
+            if old_oi <= 0:
+                return None
+            return (new_oi - old_oi) / old_oi * 100
+        except Exception as e:
+            logger.warning(f"get_oi_change_pct {symbol}: {e}")
+            return None
+
+    async def get_funding_rate(self, symbol: str) -> dict | None:
+        """Returns {'rate': float, 'next_funding_ms': int, 'mark_price': float}
+        for the symbol, or None on failure."""
+        try:
+            r = await self._http.get("/fapi/v1/premiumIndex", params={"symbol": symbol})
+            r.raise_for_status()
+            data = r.json()
+            return {
+                "rate": float(data.get("lastFundingRate", 0)),
+                "next_funding_ms": int(data.get("nextFundingTime", 0)),
+                "mark_price": float(data.get("markPrice", 0)),
+            }
+        except Exception as e:
+            logger.warning(f"get_funding_rate {symbol}: {e}")
+            return None
+
     # ─────────────────────────────────────────────
     # Configuration
     # ─────────────────────────────────────────────
@@ -215,8 +281,11 @@ class BinanceFutures:
         return data
 
     async def limit_order(
-        self, symbol: str, side: str, qty: float, price: float
+        self, symbol: str, side: str, qty: float, price: float, post_only: bool = True,
     ) -> dict:
+        """Limit order. With post_only=True, uses GTX (post-only): the order
+        is REJECTED by Binance if it would match immediately, guaranteeing
+        maker-fee pricing (0.02% vs 0.04% taker)."""
         info = await self.load_instrument(symbol)
         sz = self._qty(qty, info["step_size"], info["min_qty"])
         px = self._px(price, info["tick_size"])
@@ -226,7 +295,7 @@ class BinanceFutures:
             "type": "LIMIT",
             "quantity": sz,
             "price": px,
-            "timeInForce": "GTC",
+            "timeInForce": "GTX" if post_only else "GTC",
         })
         return data
 
@@ -321,7 +390,16 @@ class BinanceFutures:
         exit_side  = "SELL" if side == "LONG" else "BUY"
 
         if use_limit and limit_price:
-            entry = await self.limit_order(symbol, order_side, qty, limit_price)
+            try:
+                entry = await self.limit_order(symbol, order_side, qty, limit_price, post_only=True)
+            except RuntimeError as e:
+                # Binance rejects post-only (GTX) with -2021 if it would match
+                # immediately. Fall back to market so the signal isn't lost.
+                if "-2021" in str(e) or "would immediately match" in str(e).lower():
+                    logger.info(f"{symbol} post-only rejected, falling back to market")
+                    entry = await self.market_order(symbol, order_side, qty)
+                else:
+                    raise
         else:
             entry = await self.market_order(symbol, order_side, qty)
 
