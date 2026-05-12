@@ -27,6 +27,8 @@ _MAX_LEV: dict[str, int] = {
     "XRPUSDT":      12,
     "DOGEUSDT":     12,
     "SUIUSDT":      10,
+    "TONUSDT":      10,   # 24h range ~10% — keep cap conservative
+    "HYPEUSDT":     10,   # new listing, modest vol — conservative
 }
 _DEFAULT_MAX = 8  # unknown symbol — conservative
 

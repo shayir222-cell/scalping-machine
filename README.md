@@ -101,6 +101,8 @@ leverage.
 | XRPUSDT | x12 | |
 | DOGEUSDT | x12 | |
 | SUIUSDT | x10 | Wider 24h range |
+| TONUSDT | x10 | |
+| HYPEUSDT | x10 | New listing — conservative |
 
 Auto-halved on: 2+ loss streak, daily DD ≤ −3%, chaotic ATR, outside
 session, or `/safe` mode.
