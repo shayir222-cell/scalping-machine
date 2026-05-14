@@ -4,7 +4,7 @@ FastAPI entry point — webhook receiver + bot state management
 import asyncio
 import os
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 # Load .env before any application module imports that depend on environment variables
