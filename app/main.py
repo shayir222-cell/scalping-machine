@@ -745,6 +745,40 @@ async def _handle_close(signal: WebhookSignal) -> None:
     ts = open_trades.get(signal.symbol)
     if not ts:
         return
+
+    # ── signal_close filter ──────────────────────────────────────────
+    # Pine flips faster than our TP1 (1.5R) is reachable. Without a
+    # filter, every trade exits as signal_close after 1-3 min — fees
+    # dominate and net PnL stays slightly negative. We ignore close
+    # signals when:
+    #   • position is younger than MIN_HOLD_SEC (300s = 5 min), OR
+    #   • PnL is in the noise band (-0.30% .. +0.40% of notional)
+    # In those cases we let SL/TP/the next opposite signal decide.
+    # If the next opposite signal arrives after the filter window, it's
+    # treated as a fresh entry signal — webhook handler already prevents
+    # duplicate entries by symbol, so the position simply rides until
+    # SL/TP1.
+    MIN_HOLD_SEC = 300
+    LOSS_FLOOR_PCT = -0.30   # close immediately if we're already in pain
+    PROFIT_CEIL_PCT = 0.40   # close immediately if we already won
+
+    hold_sec_now = int((datetime.now(UTC) - ts.opened_at).total_seconds()) if ts.opened_at else 0
+    notional = ts.entry_price * ts.quantity
+    pnl_gross_now = (signal.price - ts.entry_price) * ts.quantity * (1 if ts.side == "LONG" else -1)
+    pnl_pct_now = (pnl_gross_now / notional * 100) if notional > 0 else 0.0
+
+    if (hold_sec_now < MIN_HOLD_SEC
+            and LOSS_FLOOR_PCT < pnl_pct_now < PROFIT_CEIL_PCT):
+        logger.info(
+            f"Ignoring signal_close for {signal.symbol}: hold={hold_sec_now}s "
+            f"pnl={pnl_pct_now:+.2f}% (in noise band, letting TP/SL decide)"
+        )
+        await tg.alert_signal_rejected(
+            signal.symbol, signal.action, signal.score,
+            f"Hold {hold_sec_now}s pnl {pnl_pct_now:+.2f}% — letting TP/SL run"
+        )
+        return
+
     try:
         await execution.cancel_all_orders(signal.symbol)
         await execution.close_position(signal.symbol, ts.side)

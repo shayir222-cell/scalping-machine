@@ -59,20 +59,21 @@ class AIOptimizer:
                 logger.info("No trades in last 72h for analysis")
                 return None
             
-            # Calculate metrics
-            wins = sum(1 for t in trades if t.pnl_usdt and t.pnl_usdt > 0)
+            # Calculate metrics — cast Decimal columns to float at source
+            # to avoid `Decimal / float` TypeError downstream.
+            wins = sum(1 for t in trades if t.pnl_usdt and float(t.pnl_usdt) > 0)
             total = len(trades)
             win_rate = (wins / total) * 100 if total > 0 else 0
-            total_pnl = sum(t.pnl_usdt or 0 for t in trades)
+            total_pnl = sum(float(t.pnl_usdt or 0) for t in trades)
             expectancy = total_pnl / total if total > 0 else 0
             avg_leverage = sum(t.leverage or 0 for t in trades) / total if total > 0 else 1
-            
+
             # Pair analysis
             pair_pnl: dict[str, float] = {}
             for t in trades:
                 if t.symbol not in pair_pnl:
-                    pair_pnl[t.symbol] = 0
-                pair_pnl[t.symbol] += t.pnl_usdt or 0
+                    pair_pnl[t.symbol] = 0.0
+                pair_pnl[t.symbol] += float(t.pnl_usdt or 0)
             
             best_pair = max(pair_pnl, key=pair_pnl.get) if pair_pnl else "—"
             worst_pair = min(pair_pnl, key=pair_pnl.get) if pair_pnl else "—"
