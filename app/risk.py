@@ -153,14 +153,24 @@ class RiskEngine:
 
     @staticmethod
     def tp_prices(entry: float, sl: float, side: str) -> tuple[float, float, float]:
-        """Returns (tp1, tp2, tp3) at 2.5R, 5.0R, 8.0R"""
+        # 1.5R / 3R / 5R: TV strategy flips fast (signal_close dominates),
+        # so TP1 must be reachable inside the typical hold window.
         risk = abs(entry - sl)
         if side == "LONG":
-            return entry + risk * 2.5, entry + risk * 5.0, entry + risk * 8.0
-        return entry - risk * 2.5, entry - risk * 5.0, entry - risk * 8.0
+            return entry + risk * 1.5, entry + risk * 3.0, entry + risk * 5.0
+        return entry - risk * 1.5, entry - risk * 3.0, entry - risk * 5.0
 
     @staticmethod
-    def sl_from_atr(entry: float, atr: float, side: str, multiplier: float = 2.0) -> float:
+    def sl_from_atr(
+        entry: float,
+        atr: float,
+        side: str,
+        multiplier: float = 2.0,
+        min_pct: float = 0.0025,
+    ) -> float:
+        # Floor SL at min_pct of entry so fees don't dominate net PnL
+        # when ATR is unusually tight (e.g. XRP at 0.007% move → fee-kill).
+        sl_dist = max(atr * multiplier, entry * min_pct)
         if side == "LONG":
-            return entry - atr * multiplier
-        return entry + atr * multiplier
+            return entry - sl_dist
+        return entry + sl_dist

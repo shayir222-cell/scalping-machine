@@ -261,10 +261,25 @@ async def _reconcile_closed_position(symbol: str, trade: TradeState) -> None:
     risk_engine.record_result(is_win)
     get_pair_ranking().record_trade_result(symbol, is_win, net_pnl)
 
+    # Classify exit by comparing exit_price to actual TP1/SL price levels
+    # with 0.1% tolerance. Fixes false tp_hit when price drifted in the
+    # favorable direction by a few ticks but fees flipped net to negative.
+    tp1 = float(trade.tp1_price) if trade.tp1_price else 0.0
+    sl = float(trade.sl_price) if trade.sl_price else 0.0
     if trade.side == "LONG":
-        exit_reason = "tp_hit" if exit_price > trade.entry_price else "sl_hit"
+        if tp1 > 0 and exit_price >= tp1 * 0.999:
+            exit_reason = "tp_hit"
+        elif sl > 0 and exit_price <= sl * 1.001:
+            exit_reason = "sl_hit"
+        else:
+            exit_reason = "tp_hit" if is_win else "sl_hit"
     else:
-        exit_reason = "tp_hit" if exit_price < trade.entry_price else "sl_hit"
+        if tp1 > 0 and exit_price <= tp1 * 1.001:
+            exit_reason = "tp_hit"
+        elif sl > 0 and exit_price >= sl * 0.999:
+            exit_reason = "sl_hit"
+        else:
+            exit_reason = "tp_hit" if is_win else "sl_hit"
 
     async with SessionLocal() as db:
         from sqlalchemy import select
@@ -382,6 +397,15 @@ async def _send_daily_report() -> None:
             best = max(by_sym.items(), key=lambda x: x[1]) if by_sym else None
             worst = min(by_sym.items(), key=lambda x: x[1]) if by_sym else None
 
+            # Exit-reason breakdown and avg hold time
+            by_reason: dict[str, int] = {}
+            for t in trades:
+                key = t.exit_reason or "unknown"
+                by_reason[key] = by_reason.get(key, 0) + 1
+            reason_str = ", ".join(f"{k}:{v}" for k, v in sorted(by_reason.items()))
+            hold_vals = [int(t.hold_time_sec) for t in trades if t.hold_time_sec]
+            avg_hold = sum(hold_vals) / len(hold_vals) if hold_vals else 0
+
             wb, upnl = await execution.get_balance_usdt()
             eq = risk_engine.true_equity(wb, upnl)
             dd_d = risk_engine.daily_dd_pct(eq)
@@ -390,8 +414,9 @@ async def _send_daily_report() -> None:
             msg = (
                 f"📊 <b>Daily report</b>\n"
                 f"Trades: <b>{n}</b> ({wins}W / {losses}L, WR <b>{wr:.0f}%</b>)\n"
-                f"PnL 24h: <b>{pnl:+.4f} USDT</b>\n"
-                f"Fees: {fees:.4f} USDT\n"
+                f"PnL 24h: <b>{pnl:+.4f} USDT</b>  (fees {fees:.4f})\n"
+                f"Avg hold: {avg_hold/60:.1f} min\n"
+                f"Exits: {reason_str}\n"
                 f"Best: {best[0]} {best[1]:+.4f}\n"
                 f"Worst: {worst[0]} {worst[1]:+.4f}\n"
                 f"Equity: ${eq:.2f}  (day {dd_d:+.2f}% / week {dd_w:+.2f}%)"
