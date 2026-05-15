@@ -153,12 +153,15 @@ class RiskEngine:
 
     @staticmethod
     def tp_prices(entry: float, sl: float, side: str) -> tuple[float, float, float]:
-        # 1.5R / 3R / 5R: TV strategy flips fast (signal_close dominates),
-        # so TP1 must be reachable inside the typical hold window.
+        # 1.0R / 2.0R / 3.0R — matches Pine calibration (rr1/rr2/rr3 in
+        # scalp_strategy.pine). Forensic on 20 live trades: median peak
+        # excursion was 1.31R; 65% reached 1.0R but only 45% reached the
+        # prior 1.5R TP1, so signal_close was systematically clipping
+        # winners before TP1.
         risk = abs(entry - sl)
         if side == "LONG":
-            return entry + risk * 1.5, entry + risk * 3.0, entry + risk * 5.0
-        return entry - risk * 1.5, entry - risk * 3.0, entry - risk * 5.0
+            return entry + risk * 1.0, entry + risk * 2.0, entry + risk * 3.0
+        return entry - risk * 1.0, entry - risk * 2.0, entry - risk * 3.0
 
     @staticmethod
     def sl_from_atr(

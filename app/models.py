@@ -25,8 +25,8 @@ class WebhookSignal(BaseModel):
     def normalize_symbol(cls, v: str) -> str:
         v = v.upper().replace("/", "").replace(".P", "").replace("PERP", "")
         allowed = {
-            "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT",
-            "XRPUSDT", "DOGEUSDT", "SUIUSDT",
+            "ETHUSDT", "SOLUSDT", "BNBUSDT",
+            "XRPUSDT", "DOGEUSDT",
             "TONUSDT", "HYPEUSDT",
         }
         if v not in allowed:

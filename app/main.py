@@ -642,7 +642,7 @@ async def _process_signal(signal: WebhookSignal, sig_id: int) -> None:
 
     side = "LONG" if signal.action == "buy" else "SHORT"
     entry = signal.price
-    sl = risk_engine.sl_from_atr(entry, atr, side, multiplier=2.0)
+    sl = risk_engine.sl_from_atr(entry, atr, side, multiplier=1.5)
     tp1, tp2, tp3 = risk_engine.tp_prices(entry, sl, side)
 
     qty = risk_engine.position_size(true_eq, risk_pct, entry, sl, leverage)
@@ -747,20 +747,16 @@ async def _handle_close(signal: WebhookSignal) -> None:
         return
 
     # ── signal_close filter ──────────────────────────────────────────
-    # Pine flips faster than our TP1 (1.5R) is reachable. Without a
-    # filter, every trade exits as signal_close after 1-3 min — fees
-    # dominate and net PnL stays slightly negative. We ignore close
-    # signals when:
-    #   • position is younger than MIN_HOLD_SEC (300s = 5 min), OR
-    #   • PnL is in the noise band (-0.30% .. +0.40% of notional)
-    # In those cases we let SL/TP/the next opposite signal decide.
-    # If the next opposite signal arrives after the filter window, it's
-    # treated as a fresh entry signal — webhook handler already prevents
-    # duplicate entries by symbol, so the position simply rides until
-    # SL/TP1.
-    MIN_HOLD_SEC = 300
-    LOSS_FLOOR_PCT = -0.30   # close immediately if we're already in pain
-    PROFIT_CEIL_PCT = 0.40   # close immediately if we already won
+    # Pine flips faster than TP1 is reachable. We ignore close signals
+    # while in a wide noise band so trades have room to develop to TP1.
+    # Forensic on 20 trades: 67% of signal_close exits surrendered a
+    # peak ≥1.0R. The prior tight band (±0.30/+0.40%) let signal_close
+    # fire as soon as the move barely cleared noise, clipping winners.
+    # Widened to ±1.00/+1.50% so only large pre-TP swings break the
+    # filter; everything else rides to SL or TP1.
+    MIN_HOLD_SEC = 180
+    LOSS_FLOOR_PCT = -1.00   # close immediately if we're already in pain
+    PROFIT_CEIL_PCT = 1.50   # close immediately if we already won big
 
     hold_sec_now = int((datetime.now(UTC) - ts.opened_at).total_seconds()) if ts.opened_at else 0
     notional = ts.entry_price * ts.quantity
