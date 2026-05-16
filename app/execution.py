@@ -116,8 +116,8 @@ class BinanceFutures:
             if item["symbol"] == symbol:
                 filters = {f["filterType"]: f for f in item["filters"]}
                 info = {
-                    "tick_size": float(filters["PRICE_FILTER"]["tickSize"]),
-                    "step_size": float(filters["LOT_SIZE"]["stepSize"]),
+                    "tick_size": filters["PRICE_FILTER"]["tickSize"],
+                    "step_size": filters["LOT_SIZE"]["stepSize"],
                     "min_qty":   float(filters["LOT_SIZE"]["minQty"]),
                 }
                 _info_cache[symbol] = info
@@ -126,14 +126,16 @@ class BinanceFutures:
         raise ValueError(f"Symbol {symbol} not found")
 
     @staticmethod
-    def _px(price: float, tick: float) -> str:
-        return str(Decimal(str(price)).quantize(Decimal(str(tick)), rounding=ROUND_DOWN))
+    def _px(price: float, tick: str) -> str:
+        return str(Decimal(str(price)).quantize(Decimal(tick), rounding=ROUND_DOWN))
 
     @staticmethod
-    def _qty(qty: float, step: float, min_qty: float) -> str:
-        rounded = float(Decimal(str(qty)).quantize(Decimal(str(step)), rounding=ROUND_DOWN))
-        rounded = max(rounded, min_qty)
-        return str(Decimal(str(rounded)).quantize(Decimal(str(step))))
+    def _qty(qty: float, step: str, min_qty: float) -> str:
+        step_d = Decimal(step)
+        rounded = Decimal(str(qty)).quantize(step_d, rounding=ROUND_DOWN)
+        if rounded < Decimal(str(min_qty)):
+            rounded = Decimal(str(min_qty)).quantize(step_d, rounding=ROUND_DOWN)
+        return str(rounded)
 
     # ─────────────────────────────────────────────
     # Account
