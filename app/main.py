@@ -518,7 +518,14 @@ async def _process_signal(signal: WebhookSignal, sig_id: int) -> None:
         return
 
     # ── Score gate ──
-    min_score = 70 if mode == BotMode.AGGRESSIVE else 75 if mode == BotMode.NORMAL else 80
+    # Raised from 70/75/80 → 78/82/85 after 24-trade analysis (12-16 May):
+    # score <80 had 33% WR / -$0.36; 80-89 had 50% WR / +$0.66; ≥90 had 29% WR / -$1.52.
+    # Cutting the <82 hurt-band keeps the productive middle.
+    base_gate = 78 if mode == BotMode.AGGRESSIVE else 82 if mode == BotMode.NORMAL else 85
+    # Per-pair bump: pairs with weak rolling WR need stronger setups.
+    # SOLUSDT: 17% WR on n=6 (1W/5L), only saved by a single +0.71 winner.
+    per_pair_bump = {"SOLUSDT": 3}.get(signal.symbol, 0)
+    min_score = base_gate + per_pair_bump
     if signal.score < min_score:
         await tg.alert_signal_rejected(signal.symbol, signal.action, signal.score,
                                         f"Score {signal.score} < {min_score}")
@@ -548,10 +555,13 @@ async def _process_signal(signal: WebhookSignal, sig_id: int) -> None:
         return
 
     # ── Pair-correlation guard ──
-    # BTC/ETH/SOL move together (~0.85). Holding any of them already
+    # ETH/SOL/XRP move together on most 5m windows. Holding any of them
     # plus a new same-direction signal on another → halve risk_pct.
+    # BTC removed from set in 2c3f0b4 (whitelist drop). XRP added 2026-05-16
+    # after the 18:20 ETH+XRP+SOL same-second short cluster lost -$1.42
+    # in a single window (trades 22/23/24 in /trades).
     side_dir = "LONG" if signal.action == "buy" else "SHORT"
-    correlated_majors = {"BTCUSDT", "ETHUSDT", "SOLUSDT"}
+    correlated_majors = {"ETHUSDT", "SOLUSDT", "XRPUSDT"}
     if signal.symbol in correlated_majors:
         same_dir_correlated = [
             s for s, t in open_trades.items()

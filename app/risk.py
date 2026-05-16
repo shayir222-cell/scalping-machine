@@ -94,12 +94,12 @@ class RiskEngine:
     # ──────────────────────────────────────────────
 
     def risk_pct(self, score: int, mode: str = "normal") -> float:
+        # Flat 1% (0.5% in safe) — score-tier bonuses removed 2026-05-16 after
+        # 24-trade review: score≥90 had 29% WR / -$1.52, worse than 80-89
+        # (50% WR / +$0.66). The premium bonus was actively scaling losses.
+        # The `score` arg is kept for back-compat / future per-tier sizing.
         if mode == "safe":
             return 0.5
-        if score >= 90:
-            return 1.5
-        if score >= 85:
-            return 1.25
         return 1.0
 
     def position_size(
