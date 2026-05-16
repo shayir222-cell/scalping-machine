@@ -758,13 +758,21 @@ async def _handle_close(signal: WebhookSignal) -> None:
 
     # ── signal_close filter ──────────────────────────────────────────
     # Pine flips faster than TP1 is reachable. We ignore close signals
-    # while in a wide noise band so trades have room to develop to TP1.
-    # Forensic on 20 trades: 67% of signal_close exits surrendered a
-    # peak ≥1.0R. The prior tight band (±0.30/+0.40%) let signal_close
-    # fire as soon as the move barely cleared noise, clipping winners.
-    # Widened to ±1.00/+1.50% so only large pre-TP swings break the
-    # filter; everything else rides to SL or TP1.
-    MIN_HOLD_SEC = 180
+    # while the trade is still in a wide noise band — let it run to SL or TP.
+    #
+    # History:
+    #  - Forensic on 20 trades: 67% of signal_close exits surrendered a
+    #    peak ≥1.0R. Pine was clipping winners.
+    #  - 2c3f0b4: widened band to ±1.00/+1.50%, added MIN_HOLD_SEC=180 gate.
+    #  - 2026-05-16 (this rev): dropped the hold-time gate after a live
+    #    trade SHORT 1.4086 closed at 1.4089 (PnL -0.02%, well inside band)
+    #    because it had been held >180s. The hold-time guard only protected
+    #    the first 3 minutes — after that any Pine flip closed at noise,
+    #    paying fees for nothing. The point of the band is "trade hasn't
+    #    moved meaningfully yet", which is independent of how long we've
+    #    been waiting.
+    #
+    # Outside the band → close honored immediately (clear win or clear loss).
     LOSS_FLOOR_PCT = -1.00   # close immediately if we're already in pain
     PROFIT_CEIL_PCT = 1.50   # close immediately if we already won big
 
@@ -773,8 +781,7 @@ async def _handle_close(signal: WebhookSignal) -> None:
     pnl_gross_now = (signal.price - ts.entry_price) * ts.quantity * (1 if ts.side == "LONG" else -1)
     pnl_pct_now = (pnl_gross_now / notional * 100) if notional > 0 else 0.0
 
-    if (hold_sec_now < MIN_HOLD_SEC
-            and LOSS_FLOOR_PCT < pnl_pct_now < PROFIT_CEIL_PCT):
+    if LOSS_FLOOR_PCT < pnl_pct_now < PROFIT_CEIL_PCT:
         logger.info(
             f"Ignoring signal_close for {signal.symbol}: hold={hold_sec_now}s "
             f"pnl={pnl_pct_now:+.2f}% (in noise band, letting TP/SL decide)"
