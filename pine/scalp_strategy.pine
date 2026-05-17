@@ -31,9 +31,9 @@ low_vol  = atr < atr_avg * 0.7
 htf_3() => [close, ta.ema(close, 20), ta.ema(close, 50)]
 htf_2() => [close, ta.ema(close, 20)]
 
-[h1_c,  h1_e20,  h1_e50]  = request.security(syminfo.basecurrency + syminfo.currencyid, "60", htf_3(), lookahead=barmerge.lookahead_off)
-[m15_c, m15_e20, m15_e50] = request.security(syminfo.basecurrency + syminfo.currencyid, "15", htf_3(), lookahead=barmerge.lookahead_off)
-[m1_c,  m1_e20]           = request.security(syminfo.basecurrency + syminfo.currencyid, "1",  htf_2(), lookahead=barmerge.lookahead_off)
+[h1_c,  h1_e20,  h1_e50]  = request.security(syminfo.tickerid, "60", htf_3(), lookahead=barmerge.lookahead_off)
+[m15_c, m15_e20, m15_e50] = request.security(syminfo.tickerid, "15", htf_3(), lookahead=barmerge.lookahead_off)
+[m1_c,  m1_e20]           = request.security(syminfo.tickerid, "1",  htf_2(), lookahead=barmerge.lookahead_off)
 
 h1_bull  = h1_c  > h1_e50  and h1_e20  > h1_e50
 h1_bear  = h1_c  < h1_e50  and h1_e20  < h1_e50
