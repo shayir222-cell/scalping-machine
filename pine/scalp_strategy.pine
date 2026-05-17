@@ -1,4 +1,4 @@
-//@version=5
+//@version=6
 strategy("Scalping Machine PRO 4-TF (Binance)", overlay=true, max_bars_back=500, default_qty_type=strategy.percent_of_equity, default_qty_value=1, commission_type=strategy.commission.percent, commission_value=0.04, initial_capital=100, pyramiding=0)
 
 // ===== INPUTS =====
@@ -17,17 +17,17 @@ show_labels    = input.bool(true, "Show labels",               group="Display")
 webhook_token  = input.string("CHANGE_ME", "Webhook token",    group="Webhook", tooltip="Must match WEBHOOK_TOKEN in bot .env")
 
 // ===== CORE INDICATORS =====
-ema20    = ta.ema(close, 20)
-ema50    = ta.ema(close, 50)
-ema200   = ta.ema(close, 200)
-vwap_val = ta.vwap(hlc3)
-atr      = ta.atr(atr_len)
-vol_avg  = ta.sma(volume, vol_len)
+ema20     = ta.ema(close, 20)
+ema50     = ta.ema(close, 50)
+ema200    = ta.ema(close, 200)
+vwap_val  = ta.vwap(hlc3)
+atr       = ta.atr(atr_len)
+vol_avg   = ta.sma(volume, vol_len)
 vol_spike = volume > vol_avg * vol_mult
-atr_avg  = ta.sma(atr, 20)
-low_vol  = atr < atr_avg * 0.7
+atr_avg   = ta.sma(atr, 20)
+low_vol   = atr < atr_avg * 0.7
 
-// ===== HTF DATA (wrapped — Pine best practice) =====
+// ===== HTF DATA =====
 htf_3() => [close, ta.ema(close, 20), ta.ema(close, 50)]
 htf_2() => [close, ta.ema(close, 20)]
 
@@ -82,15 +82,15 @@ fake_break_long  = high > ta.highest(high[1], 5) and close < open
 fake_break_short = low  < ta.lowest(low[1],   5) and close > open
 
 // ===== SCORE 0-100 =====
-trend_score_l = h1_bull and m15_bull ? 20 : h1_bull ? 13 : m15_bull ? 8 : 0
-trend_score_s = h1_bear and m15_bear ? 20 : h1_bear ? 13 : m15_bear ? 8 : 0
+trend_score_l = h1_bull  and m15_bull  ? 20 : h1_bull  ? 13 : m15_bull  ? 8 : 0
+trend_score_s = h1_bear  and m15_bear  ? 20 : h1_bear  ? 13 : m15_bear  ? 8 : 0
 vol_score     = vol_spike ? 20 : volume > vol_avg ? 12 : volume > vol_avg * 0.7 ? 6 : 0
 vwap_score_l  = close > vwap_val * 1.001 ? 15 : close > vwap_val ? 9 : close > vwap_val * 0.999 ? 4 : 0
 vwap_score_s  = close < vwap_val * 0.999 ? 15 : close < vwap_val ? 9 : close < vwap_val * 1.001 ? 4 : 0
 htf_score_l   = align_long  == 4 ? 20 : align_long  == 3 ? 15 : align_long  == 2 ? 8 : 0
 htf_score_s   = align_short == 4 ? 20 : align_short == 3 ? 15 : align_short == 2 ? 8 : 0
-liq_score_l   = bos_long  ? 15 : sweep_low  ? 12 : close > ema20 ? 6 : 0
-liq_score_s   = bos_short ? 15 : sweep_high ? 12 : close < ema20 ? 6 : 0
+liq_score_l   = bos_long   ? 15 : sweep_low   ? 12 : close > ema20 ? 6 : 0
+liq_score_s   = bos_short  ? 15 : sweep_high  ? 12 : close < ema20 ? 6 : 0
 session_score = in_london and in_ny ? 10 : in_session ? 6 : 0
 
 score_long  = trend_score_l + vol_score + vwap_score_l + htf_score_l + liq_score_l + session_score
@@ -100,12 +100,12 @@ vol_ok    = not use_vol_filter or not low_vol
 min_score = mode == "AGGRESSIVE" ? 70 : mode == "BALANCED" ? 75 : 85
 
 // ===== SIGNALS =====
-long_entry  = ta.crossover(close,  trail)
-short_entry = ta.crossunder(close, trail)
+long_entry   = ta.crossover(close,  trail)
+short_entry  = ta.crossunder(close, trail)
 long_signal  = long_entry  and h1_bull and m15_bull and not fake_break_long  and score_long  >= min_score and session_ok and vol_ok
 short_signal = short_entry and h1_bear and m15_bear and not fake_break_short and score_short >= min_score and session_ok and vol_ok
-close_long  = close < trail and h1_bear
-close_short = close > trail and h1_bull
+close_long   = close < trail and h1_bear
+close_short  = close > trail and h1_bull
 
 // ===== RISK =====
 long_sl   = close - atr * atr_sl
@@ -117,30 +117,52 @@ short_tp1 = close - (short_sl - close) * rr1
 short_tp2 = close - (short_sl - close) * rr2
 short_tp3 = close - (short_sl - close) * rr3
 
-leverage = score_long >= 90 or score_short >= 90 ? 12 : score_long >= 85 or score_short >= 85 ? 10 : score_long >= 80 or score_short >= 80 ? 8 : score_long >= 70 or score_short >= 70 ? 4 : 2
+// Leverage tier — explicit parens to nail v5 precedence
+prem_score = math.max(score_long, score_short)
+leverage = (prem_score >= 90) ? 12 : (prem_score >= 85) ? 10 : (prem_score >= 80) ? 8 : (prem_score >= 70) ? 4 : 2
 
 // ===== PLOTS =====
-plot(trail,    "ATR Trail", color=trend_up ? color.green : color.red, linewidth=2)
-plot(vwap_val, "VWAP",      color=color.orange,                       linewidth=2)
-plot(ema20,    "EMA20",     color=color.blue,                         linewidth=1)
-plot(ema50,    "EMA50",     color=color.new(color.orange, 50),        linewidth=1)
-plot(ema200,   "EMA200",    color=color.new(color.red, 50),           linewidth=1)
+plot(trail,    "ATR Trail", color=(trend_up ? color.green : color.red), linewidth=2)
+plot(vwap_val, "VWAP",      color=color.orange,                         linewidth=2)
+plot(ema20,    "EMA20",     color=color.blue,                           linewidth=1)
+plot(ema50,    "EMA50",     color=color.new(color.orange, 50),          linewidth=1)
+plot(ema200,   "EMA200",    color=color.new(color.red, 50),             linewidth=1)
 plotshape(long_signal  and show_labels, "BUY",  location=location.belowbar, color=color.green, style=shape.labelup,   text="BUY")
 plotshape(short_signal and show_labels, "SELL", location=location.abovebar, color=color.red,   style=shape.labeldown, text="SELL")
 
-plot(long_signal ? score_long : short_signal ? score_short : 0, "Score",    display=display.data_window)
-plot(align_long > 0 ? align_long : align_short,                 "TF Align", display=display.data_window)
-plot(leverage,                                                  "Leverage", display=display.data_window)
+plot(long_signal ? score_long : (short_signal ? score_short : 0), "Score",    display=display.data_window)
+plot(align_long > 0 ? align_long : align_short,                   "TF Align", display=display.data_window)
+plot(leverage,                                                    "Leverage", display=display.data_window)
 
 // ===== ALERT JSON =====
-iso_time = str.format_time(timenow, "yyyy-MM-dd'T'HH:mm:ss'Z'", "UTC")
+// Pine v5 has no string-line-continuation; concatenations are built in steps
+// to keep individual lines short and the TV editor happy.
+iso_time   = str.format_time(time, "yyyy-MM-dd'T'HH:mm:ss'Z'", "UTC")
+sym_str    = syminfo.basecurrency + syminfo.currency
+price_str  = str.tostring(close, "#.####")
+atr_str    = str.tostring(atr,   "#.####")
+score_l_s  = str.tostring(score_long,  "0")
+score_s_s  = str.tostring(score_short, "0")
+align_l_s  = str.tostring(align_long)
+align_s_s  = str.tostring(align_short)
+lev_s      = str.tostring(leverage)
 
-json_buy = '{"token":"' + webhook_token + '","action":"buy","symbol":"' + syminfo.basecurrency + syminfo.currency + '","price":' + str.tostring(close, "#.####") + ',"score":' + str.tostring(int(score_long)) + ',"atr":' + str.tostring(atr, "#.####") + ',"tf_alignment":' + str.tostring(align_long) + ',"leverage":' + str.tostring(leverage) + ',"sl":' + str.tostring(long_sl, "#.####") + ',"tp1":' + str.tostring(long_tp1, "#.####") + ',"tp2":' + str.tostring(long_tp2, "#.####") + ',"tp3":' + str.tostring(long_tp3, "#.####") + ',"time":"' + iso_time + '"}'
+long_sl_s  = str.tostring(long_sl,  "#.####")
+long_tp1_s = str.tostring(long_tp1, "#.####")
+long_tp2_s = str.tostring(long_tp2, "#.####")
+long_tp3_s = str.tostring(long_tp3, "#.####")
 
-json_sell = '{"token":"' + webhook_token + '","action":"sell","symbol":"' + syminfo.basecurrency + syminfo.currency + '","price":' + str.tostring(close, "#.####") + ',"score":' + str.tostring(int(score_short)) + ',"atr":' + str.tostring(atr, "#.####") + ',"tf_alignment":' + str.tostring(align_short) + ',"leverage":' + str.tostring(leverage) + ',"sl":' + str.tostring(short_sl, "#.####") + ',"tp1":' + str.tostring(short_tp1, "#.####") + ',"tp2":' + str.tostring(short_tp2, "#.####") + ',"tp3":' + str.tostring(short_tp3, "#.####") + ',"time":"' + iso_time + '"}'
+short_sl_s  = str.tostring(short_sl,  "#.####")
+short_tp1_s = str.tostring(short_tp1, "#.####")
+short_tp2_s = str.tostring(short_tp2, "#.####")
+short_tp3_s = str.tostring(short_tp3, "#.####")
 
-json_close_long  = '{"token":"' + webhook_token + '","action":"close_long","symbol":"'  + syminfo.basecurrency + syminfo.currency + '","price":' + str.tostring(close, "#.####") + ',"score":' + str.tostring(int(score_short)) + ',"time":"' + iso_time + '"}'
-json_close_short = '{"token":"' + webhook_token + '","action":"close_short","symbol":"' + syminfo.basecurrency + syminfo.currency + '","price":' + str.tostring(close, "#.####") + ',"score":' + str.tostring(int(score_long))  + ',"time":"' + iso_time + '"}'
+json_buy = '{"token":"' + webhook_token + '","action":"buy","symbol":"' + sym_str + '","price":' + price_str + ',"score":' + score_l_s + ',"atr":' + atr_str + ',"tf_alignment":' + align_l_s + ',"leverage":' + lev_s + ',"sl":' + long_sl_s + ',"tp1":' + long_tp1_s + ',"tp2":' + long_tp2_s + ',"tp3":' + long_tp3_s + ',"time":"' + iso_time + '"}'
+
+json_sell = '{"token":"' + webhook_token + '","action":"sell","symbol":"' + sym_str + '","price":' + price_str + ',"score":' + score_s_s + ',"atr":' + atr_str + ',"tf_alignment":' + align_s_s + ',"leverage":' + lev_s + ',"sl":' + short_sl_s + ',"tp1":' + short_tp1_s + ',"tp2":' + short_tp2_s + ',"tp3":' + short_tp3_s + ',"time":"' + iso_time + '"}'
+
+json_close_long  = '{"token":"' + webhook_token + '","action":"close_long","symbol":"'  + sym_str + '","price":' + price_str + ',"score":' + score_s_s + ',"time":"' + iso_time + '"}'
+json_close_short = '{"token":"' + webhook_token + '","action":"close_short","symbol":"' + sym_str + '","price":' + price_str + ',"score":' + score_l_s + ',"time":"' + iso_time + '"}'
 
 if long_signal
     alert(json_buy, alert.freq_once_per_bar_close)
@@ -157,12 +179,12 @@ if close_short
 // ===== BACKTEST =====
 if long_signal and strategy.position_size == 0
     strategy.entry("Long", strategy.long)
-    strategy.exit("TP1", "Long", qty_percent=40, limit=long_tp1, stop=long_sl)
-    strategy.exit("TP2", "Long", qty_percent=40, limit=long_tp2)
-    strategy.exit("TP3", "Long", qty_percent=20, limit=long_tp3)
+    strategy.exit("TP1", from_entry="Long", qty_percent=40, limit=long_tp1, stop=long_sl)
+    strategy.exit("TP2", from_entry="Long", qty_percent=40, limit=long_tp2)
+    strategy.exit("TP3", from_entry="Long", qty_percent=20, limit=long_tp3)
 
 if short_signal and strategy.position_size == 0
     strategy.entry("Short", strategy.short)
-    strategy.exit("TP1", "Short", qty_percent=40, limit=short_tp1, stop=short_sl)
-    strategy.exit("TP2", "Short", qty_percent=40, limit=short_tp2)
-    strategy.exit("TP3", "Short", qty_percent=20, limit=short_tp3)
+    strategy.exit("TP1", from_entry="Short", qty_percent=40, limit=short_tp1, stop=short_sl)
+    strategy.exit("TP2", from_entry="Short", qty_percent=40, limit=short_tp2)
+    strategy.exit("TP3", from_entry="Short", qty_percent=20, limit=short_tp3)
