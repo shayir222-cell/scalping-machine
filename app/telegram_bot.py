@@ -225,7 +225,7 @@ async def cmd_report(msg: Message) -> None:
     )
 
 
-@dp.message(Command("optimizer"))
+@dp.message(Command("optimizer", "perf"))
 async def cmd_optimizer(msg: Message) -> None:
     if not _is_owner(msg):
         return

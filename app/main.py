@@ -527,8 +527,7 @@ async def _process_signal(signal: WebhookSignal, sig_id: int) -> None:
     per_pair_bump = {"SOLUSDT": 3}.get(signal.symbol, 0)
     min_score = base_gate + per_pair_bump
     if signal.score < min_score:
-        await tg.alert_signal_rejected(signal.symbol, signal.action, signal.score,
-                                        f"Score {signal.score} < {min_score}")
+        logger.info(f"Score-gate rejected {signal.symbol} {signal.action} ({signal.score} < {min_score})")
         return
 
     # ── Equity check ──
