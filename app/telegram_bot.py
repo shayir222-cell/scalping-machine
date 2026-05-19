@@ -297,10 +297,11 @@ async def alert_daily_stop() -> None:
 
 
 async def alert_signal_rejected(symbol: str, action: str, score: int, reason: str) -> None:
-    await _send(
-        f"⚫ Signal rejected: {symbol} {action} score={score}\n"
-        f"Reason: {reason}"
-    )
+    # User wants TG kept clean — only opened trades and exits. All rejection
+    # paths funnel here, so logging instead of sending kills every variant
+    # (score-gate, self-protection, stale alert, correlation, duplicate, etc.)
+    # without touching the 8 callsites.
+    logger.info(f"Signal rejected: {symbol} {action} score={score} — {reason}")
 
 
 # ─────────────────────────────────────────────
