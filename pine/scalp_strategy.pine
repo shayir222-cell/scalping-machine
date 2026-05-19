@@ -137,7 +137,7 @@ plot(leverage,                                                    "Leverage", di
 // ===== ALERT JSON =====
 // Pine v5 has no string-line-continuation; concatenations are built in steps
 // to keep individual lines short and the TV editor happy.
-iso_time   = str.format_time(time, "yyyy-MM-dd'T'HH:mm:ss'Z'", "UTC")
+iso_time   = str.format_time(timenow, "yyyy-MM-dd'T'HH:mm:ss'Z'", "UTC")
 sym_str    = syminfo.basecurrency + syminfo.currency
 price_str  = str.tostring(close, "#.####")
 atr_str    = str.tostring(atr,   "#.####")
