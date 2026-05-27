@@ -323,7 +323,7 @@ class BinanceFutures:
     async def place_tp(
         self, symbol: str, side: str, qty: float, tp_price: float
     ) -> dict:
-        """Take-profit via the new Algo Order endpoint."""
+        """Take-profit via the Algo Order endpoint (taker on fill)."""
         info = await self.load_instrument(symbol)
         sz = self._qty(qty, info["step_size"], info["min_qty"])
         px = self._px(tp_price, info["tick_size"])
@@ -338,6 +338,35 @@ class BinanceFutures:
         })
         return data
 
+    async def place_tp_limit(
+        self, symbol: str, side: str, qty: float, tp_price: float
+    ) -> dict:
+        """Take-profit as a passive post-only LIMIT reduce-only order.
+        Fills as MAKER (0.02% fee vs 0.04% taker on TAKE_PROFIT_MARKET) —
+        recovers ~0.02% per side, ≈0.04% per round trip. On a 0.5-1.0% TP
+        leg that's 4-8% of the gross win recovered. Falls back to algo
+        TAKE_PROFIT_MARKET if Binance rejects with -2021 (price already
+        through the TP)."""
+        info = await self.load_instrument(symbol)
+        sz = self._qty(qty, info["step_size"], info["min_qty"])
+        px = self._px(tp_price, info["tick_size"])
+        try:
+            data = await self._post("/fapi/v1/order", {
+                "symbol": symbol,
+                "side": side.upper(),
+                "type": "LIMIT",
+                "quantity": sz,
+                "price": px,
+                "timeInForce": "GTX",  # post-only — guarantees maker
+                "reduceOnly": "true",
+            })
+            return data
+        except RuntimeError as e:
+            if "-2021" in str(e) or "would immediately match" in str(e).lower():
+                logger.info(f"{symbol} TP @ {px} would match → fallback to TAKE_PROFIT_MARKET")
+                return await self.place_tp(symbol, side, qty, tp_price)
+            raise
+
     async def get_open_algo_orders(self, symbol: str) -> list[dict]:
         """List open conditional/algo orders for a symbol (SL + TP)."""
         try:
@@ -349,16 +378,16 @@ class BinanceFutures:
             logger.warning(f"get_open_algo_orders {symbol}: {e}")
             return []
 
-    async def cancel_all_orders(self, symbol: str) -> None:
-        # Cancel regular pending orders (limit entries, etc.)
-        try:
-            await self._delete("/fapi/v1/allOpenOrders", {"symbol": symbol})
-        except Exception as e:
-            logger.warning(f"cancel regular {symbol}: {e}")
-        # Cancel each open algo order (SL/TP) individually
+    async def cancel_algo_orders(self, symbol: str, only_sl: bool = False) -> None:
+        """Cancel algo (conditional) orders. With only_sl=True, cancels only
+        STOP_MARKET (SL) and leaves any fallback TAKE_PROFIT_MARKET orders
+        alone — used by BE-move to preserve TP runners even when one TP fell
+        back to the algo endpoint via place_tp_limit's -2021 path."""
         try:
             algo_orders = await self.get_open_algo_orders(symbol)
             for ao in algo_orders:
+                if only_sl and ao.get("type") != "STOP_MARKET":
+                    continue
                 algo_id = ao.get("algoId") or ao.get("orderId")
                 if not algo_id:
                     continue
@@ -372,6 +401,15 @@ class BinanceFutures:
         except Exception as e:
             logger.warning(f"cancel algo batch {symbol}: {e}")
 
+    async def cancel_all_orders(self, symbol: str) -> None:
+        # Cancel regular pending orders (limit entries, post-only TPs, etc.)
+        try:
+            await self._delete("/fapi/v1/allOpenOrders", {"symbol": symbol})
+        except Exception as e:
+            logger.warning(f"cancel regular {symbol}: {e}")
+        # Cancel each open algo order (SL) individually
+        await self.cancel_algo_orders(symbol)
+
     # ─────────────────────────────────────────────
     # High-level: open / manage / close
     # ─────────────────────────────────────────────
@@ -384,10 +422,13 @@ class BinanceFutures:
         sl_price: float,
         tp1_price: float,
         tp2_price: float,
+        tp3_price: Optional[float] = None,
         use_limit: bool = False,
         limit_price: Optional[float] = None,
     ) -> dict:
-        """Entry + SL (full) + TP1 (40%)."""
+        """Entry + SL (full qty) + TP1/TP2/TP3 as post-only LIMITs
+        (40/40/20 split — matches Pine v7). If tp3_price is None,
+        falls back to legacy 40/60 split."""
         order_side = "BUY"  if side == "LONG" else "SELL"
         exit_side  = "SELL" if side == "LONG" else "BUY"
 
@@ -405,16 +446,39 @@ class BinanceFutures:
         else:
             entry = await self.market_order(symbol, order_side, qty)
 
-        # SL full qty
-        await self.place_sl(symbol, exit_side, qty, sl_price)
+        # SL + TPs placement. If anything raises we MUST not leave an
+        # unhedged position — emergency-close and re-raise.
+        try:
+            await self.place_sl(symbol, exit_side, qty, sl_price)
 
-        # TP1 40%
-        tp1_qty = qty * 0.4
-        await self.place_tp(symbol, exit_side, tp1_qty, tp1_price)
-
-        # TP2 remaining 60% at tp2_price
-        tp2_qty = qty * 0.6
-        await self.place_tp(symbol, exit_side, tp2_qty, tp2_price)
+            if tp3_price is not None:
+                tp1_qty = qty * 0.4
+                tp2_qty = qty * 0.4
+                tp3_qty = qty * 0.2
+                await self.place_tp_limit(symbol, exit_side, tp1_qty, tp1_price)
+                await self.place_tp_limit(symbol, exit_side, tp2_qty, tp2_price)
+                await self.place_tp_limit(symbol, exit_side, tp3_qty, tp3_price)
+            else:
+                tp1_qty = qty * 0.4
+                tp2_qty = qty * 0.6
+                await self.place_tp_limit(symbol, exit_side, tp1_qty, tp1_price)
+                await self.place_tp_limit(symbol, exit_side, tp2_qty, tp2_price)
+        except Exception as e:
+            logger.error(
+                f"{symbol}: SL/TP placement failed after entry — emergency closing. {e}"
+            )
+            try:
+                await self.cancel_all_orders(symbol)
+                # Re-fetch position to know actual filled qty (post-only may be partial)
+                pos = await self.get_position(symbol)
+                if pos:
+                    filled_qty = abs(float(pos.get("positionAmt", 0)))
+                    if filled_qty > 0:
+                        await self.market_order(symbol, exit_side, filled_qty)
+                        logger.info(f"{symbol}: emergency-closed {filled_qty} after SL/TP failure")
+            except Exception as cleanup_err:
+                logger.error(f"{symbol}: emergency cleanup ALSO failed: {cleanup_err}")
+            raise
 
         return entry
 
@@ -442,31 +506,24 @@ class BinanceFutures:
             logger.warning(f"get_open_orders {symbol}: {e}")
             return []
 
-    async def check_tp1_filled(self, symbol: str) -> bool:
-        """Check if first TP (40%) was filled. TPs now live in the algo
-        orders endpoint, not the regular /openOrders."""
-        try:
-            orders = await self.get_open_algo_orders(symbol)
-            tp_orders = [o for o in orders if o.get("type") == "TAKE_PROFIT_MARKET"]
-            # We open with 2 TPs; if only 1 remains, TP1 has filled.
-            return len(tp_orders) <= 1
-        except Exception as e:
-            logger.warning(f"check_tp1_filled {symbol}: {e}")
-            return False
-
     async def move_sl_to_breakeven(
         self, symbol: str, side: str, entry_price: float
     ) -> None:
-        await self.cancel_all_orders(symbol)
+        """Move SL to breakeven (with buffer covering fees on runner).
+        Cancels only the SL (only_sl=True) — leaves all TPs on the book,
+        including any that fell back to algo TAKE_PROFIT_MARKET. Buffer
+        covers maker-entry (0.02%) + taker-SL-exit (0.04%) = 0.06% net
+        cost on the BE-stopped runner, plus a small slippage margin."""
+        await self.cancel_algo_orders(symbol, only_sl=True)
         exit_side = "SELL" if side == "LONG" else "BUY"
-        buf = entry_price * 0.0001
-        be  = entry_price - buf if side == "LONG" else entry_price + buf
+        buf = entry_price * 0.0007  # +0.07% — covers maker in + taker SL out + slippage
+        be  = entry_price + buf if side == "LONG" else entry_price - buf
         pos = await self.get_position(symbol)
         if not pos:
             return
         qty = float(pos.get("positionAmt", 0))
         await self.place_sl(symbol, exit_side, abs(qty), be)
-        logger.info(f"{symbol} SL → breakeven @ {be:.6f}")
+        logger.info(f"{symbol} SL → breakeven @ {be:.6f} (TPs preserved)")
 
     async def close_position(
         self, symbol: str, side: str, qty: Optional[float] = None

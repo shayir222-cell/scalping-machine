@@ -670,12 +670,12 @@ async def _process_signal(signal: WebhookSignal, sig_id: int) -> None:
     if signal.score >= 90 and (signal.tf_alignment or 0) >= 4:
         await tg.alert_premium_setup(signal.symbol, side, signal.score)
 
-    # ── Order type: post-only limit (GTX, maker fee 0.02%) for score<90 ──
-    # Limit posted 0.05% inside the BBO so it sits as maker, gets filled
-    # within the next minute if price comes back. Binance REJECTS the
-    # order if it would match immediately → guarantees maker pricing.
-    # Premium setups (score≥90) and aggressive mode still use market.
-    use_limit   = signal.score < 90 and mode != BotMode.AGGRESSIVE
+    # ── Order type: post-only LIMIT (GTX, maker 0.02%) for everything except AGGRESSIVE ──
+    # Previously: score>=90 went market (taker 0.04%). Removed — premium
+    # setups are exactly the ones we most want maker pricing on. Limit is
+    # posted 0.05% inside the BBO so it sits as maker; falls back to
+    # market only if Binance rejects with -2021 (would immediately match).
+    use_limit   = mode != BotMode.AGGRESSIVE
     limit_price = None
     if use_limit:
         offset = entry * 0.0005
@@ -690,6 +690,7 @@ async def _process_signal(signal: WebhookSignal, sig_id: int) -> None:
             sl_price=sl,
             tp1_price=tp1,
             tp2_price=tp2,
+            tp3_price=tp3,
             use_limit=use_limit,
             limit_price=limit_price,
         )
