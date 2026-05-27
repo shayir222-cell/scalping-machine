@@ -1,17 +1,21 @@
 //@version=6
-strategy("Scalping Machine PRO 4-TF (Binance)", overlay=true, max_bars_back=500, default_qty_type=strategy.percent_of_equity, default_qty_value=1, commission_type=strategy.commission.percent, commission_value=0.04, initial_capital=100, pyramiding=0)
+strategy("Scalping Machine PRO v7 (Binance)", overlay=true, max_bars_back=500, default_qty_type=strategy.percent_of_equity, default_qty_value=1, commission_type=strategy.commission.percent, commission_value=0.04, initial_capital=100, pyramiding=0)
 
 // ===== INPUTS =====
 rr1            = input.float(1.0, "TP1 RR",          step=0.1, group="Risk")
 rr2            = input.float(2.0, "TP2 RR",          step=0.1, group="Risk")
 rr3            = input.float(3.0, "TP3 RR",          step=0.1, group="Risk")
 atr_len        = input.int(14,    "ATR Period",                group="ATR")
-atr_sl         = input.float(1.2, "ATR SL mult",     step=0.1, group="ATR")
-atr_trail      = input.float(0.8, "ATR Trail mult",  step=0.1, group="ATR")
+atr_sl         = input.float(1.8, "ATR SL mult",     step=0.1, group="ATR")
+atr_trail      = input.float(1.5, "ATR Trail mult",  step=0.1, group="ATR")
 vol_len        = input.int(20,    "Volume MA",                 group="Indicators")
 vol_mult       = input.float(1.5, "Volume spike",    step=0.1, group="Indicators")
+climax_mult    = input.float(1.5, "Climax bar (skip if range > X*ATR)", step=0.1, group="Filter")
+be_buffer_pct  = input.float(0.05, "BE buffer % (covers fees on runner)", step=0.01, group="Risk")
 use_session    = input.bool(true, "Session filter",            group="Filter")
 use_vol_filter = input.bool(true, "Volatility filter",         group="Filter")
+use_regime     = input.bool(true, "Volatility regime gate",    group="Filter")
+use_struct_exit = input.bool(false, "Require structural break on exit (advanced)", group="Filter", tooltip="OFF (default): exit on 2-bar trail flip alone. ON: also require close beyond last pivot — safer in trends, risky in chop.")
 mode           = input.string("BALANCED", "Mode", options=["AGGRESSIVE", "BALANCED", "SNIPER"], group="Filter")
 show_labels    = input.bool(true, "Show labels",               group="Display")
 webhook_token  = input.string("CHANGE_ME", "Webhook token",    group="Webhook", tooltip="Must match WEBHOOK_TOKEN in bot .env")
@@ -27,13 +31,21 @@ vol_spike = volume > vol_avg * vol_mult
 atr_avg   = ta.sma(atr, 20)
 low_vol   = atr < atr_avg * 0.7
 
-// ===== HTF DATA =====
+// ===== VOLATILITY REGIME (proper variance ratio on log returns) =====
+// Trending: short-window return-stdev > long-window stdev (persistence).
+// Mean-reverting: short < long. Random walk: ratio ≈ 1.0.
+ret             = math.log(close / nz(close[1], close))
+short_std       = ta.stdev(ret, 10)
+long_std        = ta.stdev(ret, 40)
+var_ratio       = (not na(long_std)) and long_std > 0 ? short_std / long_std : 1.0
+trending_regime = var_ratio > 1.10
+regime_ok       = not use_regime or trending_regime
+
+// ===== HTF DATA (no m1 — was adding noise) =====
 htf_3() => [close, ta.ema(close, 20), ta.ema(close, 50)]
-htf_2() => [close, ta.ema(close, 20)]
 
 [h1_c,  h1_e20,  h1_e50]  = request.security(syminfo.tickerid, "60", htf_3(), lookahead=barmerge.lookahead_off)
 [m15_c, m15_e20, m15_e50] = request.security(syminfo.tickerid, "15", htf_3(), lookahead=barmerge.lookahead_off)
-[m1_c,  m1_e20]           = request.security(syminfo.tickerid, "1",  htf_2(), lookahead=barmerge.lookahead_off)
 
 h1_bull  = h1_c  > h1_e50  and h1_e20  > h1_e50
 h1_bear  = h1_c  < h1_e50  and h1_e20  < h1_e50
@@ -41,25 +53,23 @@ m15_bull = m15_c > m15_e50 and m15_e20 > m15_e50
 m15_bear = m15_c < m15_e50 and m15_e20 < m15_e50
 m5_bull  = close > ema50   and ema20   > ema50
 m5_bear  = close < ema50   and ema20   < ema50
-m1_bull  = m1_c  > m1_e20
-m1_bear  = m1_c  < m1_e20
 
-align_long  = (h1_bull  ? 1 : 0) + (m15_bull  ? 1 : 0) + (m5_bull  ? 1 : 0) + (m1_bull  ? 1 : 0)
-align_short = (h1_bear  ? 1 : 0) + (m15_bear  ? 1 : 0) + (m5_bear  ? 1 : 0) + (m1_bear  ? 1 : 0)
+align_long  = (h1_bull  ? 1 : 0) + (m15_bull  ? 1 : 0) + (m5_bull  ? 1 : 0)
+align_short = (h1_bear  ? 1 : 0) + (m15_bear  ? 1 : 0) + (m5_bear  ? 1 : 0)
 
-// ===== ATR TRAIL =====
+// ===== ATR TRAIL — uses dedicated atr_trail (was incorrectly using atr_sl) =====
 var float trail = na
-atr_loss = atr * atr_sl
-trail := close > nz(trail[1]) ? math.max(nz(trail[1]), close - atr_loss) : math.min(nz(trail[1]), close + atr_loss)
+trail_loss = atr * atr_trail
+trail := na(trail[1]) ? close : (close > nz(trail[1]) ? math.max(nz(trail[1]), close - trail_loss) : math.min(nz(trail[1]), close + trail_loss))
 trend_up = close > trail
 
-// ===== LIQUIDITY =====
+// ===== LIQUIDITY — tighter pivots (3/3 vs 5/5 was 75min late) =====
 lookback   = 10
 sweep_low  = low  < ta.lowest(low[1],   lookback)
 sweep_high = high > ta.highest(high[1], lookback)
 
-ph = ta.pivothigh(high, 5, 5)
-pl = ta.pivotlow(low,   5, 5)
+ph = ta.pivothigh(high, 3, 3)
+pl = ta.pivotlow(low,   3, 3)
 var float last_ph = na
 var float last_pl = na
 if not na(ph)
@@ -70,42 +80,62 @@ if not na(pl)
 bos_long  = not na(last_ph) and close > last_ph and close[1] <= last_ph
 bos_short = not na(last_pl) and close < last_pl and close[1] >= last_pl
 
-// ===== SESSION (UTC) =====
+// ===== SESSION (UTC) — Tokyo included =====
 t_min      = hour * 60 + minute
+in_tokyo   = t_min >= 0   and t_min < 480
 in_london  = t_min >= 480 and t_min < 960
 in_ny      = t_min >= 780 and t_min < 1260
-in_session = in_london or in_ny
+in_session = in_tokyo or in_london or in_ny
 session_ok = not use_session or in_session
 
 // ===== FAKE BREAK =====
 fake_break_long  = high > ta.highest(high[1], 5) and close < open
 fake_break_short = low  < ta.lowest(low[1],   5) and close > open
 
+// ===== CLIMAX-BAR FILTER (skip FOMO entries on extended bars) =====
+bar_range  = high - low
+no_climax  = bar_range < atr * climax_mult
+
 // ===== SCORE 0-100 =====
 trend_score_l = h1_bull  and m15_bull  ? 20 : h1_bull  ? 13 : m15_bull  ? 8 : 0
 trend_score_s = h1_bear  and m15_bear  ? 20 : h1_bear  ? 13 : m15_bear  ? 8 : 0
-vol_score     = vol_spike ? 20 : volume > vol_avg ? 12 : volume > vol_avg * 0.7 ? 6 : 0
+// Volume: only spike OR clear 1.2x average. No reward for marginal volume.
+vol_score     = vol_spike ? 20 : volume > vol_avg * 1.2 ? 10 : 0
 vwap_score_l  = close > vwap_val * 1.001 ? 15 : close > vwap_val ? 9 : close > vwap_val * 0.999 ? 4 : 0
 vwap_score_s  = close < vwap_val * 0.999 ? 15 : close < vwap_val ? 9 : close < vwap_val * 1.001 ? 4 : 0
-htf_score_l   = align_long  == 4 ? 20 : align_long  == 3 ? 15 : align_long  == 2 ? 8 : 0
-htf_score_s   = align_short == 4 ? 20 : align_short == 3 ? 15 : align_short == 2 ? 8 : 0
-liq_score_l   = bos_long   ? 15 : sweep_low   ? 12 : close > ema20 ? 6 : 0
-liq_score_s   = bos_short  ? 15 : sweep_high  ? 12 : close < ema20 ? 6 : 0
-session_score = in_london and in_ny ? 10 : in_session ? 6 : 0
+// Rescaled for 3 TFs (was 4 with m1)
+htf_score_l   = align_long  == 3 ? 20 : align_long  == 2 ? 12 : 0
+htf_score_s   = align_short == 3 ? 20 : align_short == 2 ? 12 : 0
+// Removed `close > ema20` fallback — was double-counting with trend bucket
+liq_score_l   = bos_long   ? 15 : sweep_low   ? 12 : 0
+liq_score_s   = bos_short  ? 15 : sweep_high  ? 12 : 0
+session_score = (in_london and in_ny) ? 10 : in_session ? 6 : 0
 
 score_long  = trend_score_l + vol_score + vwap_score_l + htf_score_l + liq_score_l + session_score
 score_short = trend_score_s + vol_score + vwap_score_s + htf_score_s + liq_score_s + session_score
 
 vol_ok    = not use_vol_filter or not low_vol
-min_score = mode == "AGGRESSIVE" ? 70 : mode == "BALANCED" ? 75 : 85
+// Lowered for sample-size while tuning; bot's MIN_SCORE_ENTRY must match (78 in Phase 2)
+min_score = mode == "AGGRESSIVE" ? 72 : mode == "BALANCED" ? 78 : 88
 
 // ===== SIGNALS =====
-long_entry   = ta.crossover(close,  trail)
-short_entry  = ta.crossunder(close, trail)
-long_signal  = long_entry  and h1_bull and m15_bull and not fake_break_long  and score_long  >= min_score and session_ok and vol_ok
-short_signal = short_entry and h1_bear and m15_bear and not fake_break_short and score_short >= min_score and session_ok and vol_ok
-close_long   = close < trail and h1_bear
-close_short  = close > trail and h1_bull
+// Debounced entry: trail cross + close in upper half of bar (wick-rejection guard) + green body
+upper_half  = (close - low) > (high - close)
+lower_half  = (high - close) > (close - low)
+long_cross  = ta.crossover(close,  trail)
+short_cross = ta.crossunder(close, trail)
+long_entry  = long_cross  and upper_half and close > open
+short_entry = short_cross and lower_half and close < open
+
+long_signal  = long_entry  and h1_bull and m15_bull and not fake_break_long  and score_long  >= min_score and session_ok and vol_ok and regime_ok and no_climax
+short_signal = short_entry and h1_bear and m15_bear and not fake_break_short and score_short >= min_score and session_ok and vol_ok and regime_ok and no_climax
+
+// Exit: 2-bar trail confirmation + structural break (close beyond last pivot in exit direction)
+// This is the #1 EV fix — v6 fired signal_close 86% of the time, mostly noise.
+struct_break_long  = not use_struct_exit or (not na(last_pl) and close < last_pl)
+struct_break_short = not use_struct_exit or (not na(last_ph) and close > last_ph)
+close_long   = close < trail and close[1] < trail[1] and struct_break_long
+close_short  = close > trail and close[1] > trail[1] and struct_break_short
 
 // ===== RISK =====
 long_sl   = close - atr * atr_sl
@@ -117,9 +147,9 @@ short_tp1 = close - (short_sl - close) * rr1
 short_tp2 = close - (short_sl - close) * rr2
 short_tp3 = close - (short_sl - close) * rr3
 
-// Leverage tier — explicit parens to nail v5 precedence
 prem_score = math.max(score_long, score_short)
-leverage = (prem_score >= 90) ? 12 : (prem_score >= 85) ? 10 : (prem_score >= 80) ? 8 : (prem_score >= 70) ? 4 : 2
+// Pine emits suggested leverage; bot may override via Variant B (single max per pair)
+leverage = (prem_score >= 95) ? 10 : (prem_score >= 88) ? 8 : (prem_score >= 78) ? 6 : 4
 
 // ===== PLOTS =====
 plot(trail,    "ATR Trail", color=(trend_up ? color.green : color.red), linewidth=2)
@@ -130,13 +160,13 @@ plot(ema200,   "EMA200",    color=color.new(color.red, 50),             linewidt
 plotshape(long_signal  and show_labels, "BUY",  location=location.belowbar, color=color.green, style=shape.labelup,   text="BUY")
 plotshape(short_signal and show_labels, "SELL", location=location.abovebar, color=color.red,   style=shape.labeldown, text="SELL")
 
-plot(long_signal ? score_long : (short_signal ? score_short : 0), "Score",    display=display.data_window)
-plot(align_long > 0 ? align_long : align_short,                   "TF Align", display=display.data_window)
-plot(leverage,                                                    "Leverage", display=display.data_window)
+plot(long_signal ? score_long : (short_signal ? score_short : 0), "Score",     display=display.data_window)
+plot(align_long > 0 ? align_long : align_short,                   "TF Align",  display=display.data_window)
+plot(leverage,                                                    "Leverage",  display=display.data_window)
+plot(var_ratio,                                                   "VarRatio",  display=display.data_window)
+plot(trending_regime ? 1 : 0,                                     "Trending",  display=display.data_window)
 
 // ===== ALERT JSON =====
-// Pine v5 has no string-line-continuation; concatenations are built in steps
-// to keep individual lines short and the TV editor happy.
 iso_time   = str.format_time(timenow, "yyyy-MM-dd'T'HH:mm:ss'Z'", "UTC")
 sym_str    = syminfo.basecurrency + syminfo.currency
 price_str  = str.tostring(close, "#.####")
@@ -176,15 +206,33 @@ if close_long
 if close_short
     alert(json_close_short, alert.freq_once_per_bar_close)
 
-// ===== BACKTEST =====
+// ===== BACKTEST — initial brackets + BE-with-buffer on TP1 hit =====
+var bool be_long_moved  = false
+var bool be_short_moved = false
+
 if long_signal and strategy.position_size == 0
+    be_long_moved := false
     strategy.entry("Long", strategy.long)
     strategy.exit("TP1", from_entry="Long", qty_percent=40, limit=long_tp1, stop=long_sl)
-    strategy.exit("TP2", from_entry="Long", qty_percent=40, limit=long_tp2)
-    strategy.exit("TP3", from_entry="Long", qty_percent=20, limit=long_tp3)
+    strategy.exit("TP2", from_entry="Long", qty_percent=40, limit=long_tp2, stop=long_sl)
+    strategy.exit("TP3", from_entry="Long", qty_percent=20, limit=long_tp3, stop=long_sl)
 
 if short_signal and strategy.position_size == 0
+    be_short_moved := false
     strategy.entry("Short", strategy.short)
     strategy.exit("TP1", from_entry="Short", qty_percent=40, limit=short_tp1, stop=short_sl)
-    strategy.exit("TP2", from_entry="Short", qty_percent=40, limit=short_tp2)
-    strategy.exit("TP3", from_entry="Short", qty_percent=20, limit=short_tp3)
+    strategy.exit("TP2", from_entry="Short", qty_percent=40, limit=short_tp2, stop=short_sl)
+    strategy.exit("TP3", from_entry="Short", qty_percent=20, limit=short_tp3, stop=short_sl)
+
+// One-time BE move with fee buffer after TP1 hit (covers ~0.05% maker+slippage)
+if strategy.position_size > 0 and high >= long_tp1 and not be_long_moved
+    be_long_moved := true
+    be_long_px = strategy.position_avg_price * (1.0 + be_buffer_pct / 100.0)
+    strategy.exit("TP2", from_entry="Long", qty_percent=40, limit=long_tp2, stop=be_long_px)
+    strategy.exit("TP3", from_entry="Long", qty_percent=20, limit=long_tp3, stop=be_long_px)
+
+if strategy.position_size < 0 and low <= short_tp1 and not be_short_moved
+    be_short_moved := true
+    be_short_px = strategy.position_avg_price * (1.0 - be_buffer_pct / 100.0)
+    strategy.exit("TP2", from_entry="Short", qty_percent=40, limit=short_tp2, stop=be_short_px)
+    strategy.exit("TP3", from_entry="Short", qty_percent=20, limit=short_tp3, stop=be_short_px)

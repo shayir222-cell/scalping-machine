@@ -518,10 +518,10 @@ async def _process_signal(signal: WebhookSignal, sig_id: int) -> None:
         return
 
     # ── Score gate ──
-    # Raised from 70/75/80 → 78/82/85 after 24-trade analysis (12-16 May):
-    # score <80 had 33% WR / -$0.36; 80-89 had 50% WR / +$0.66; ≥90 had 29% WR / -$1.52.
-    # Cutting the <82 hurt-band keeps the productive middle.
-    base_gate = 78 if mode == BotMode.AGGRESSIVE else 82 if mode == BotMode.NORMAL else 85
+    # Aligned with Pine v7.1: 72 / 78 / 88 (was 78/82/85).
+    # Pine v7 nerfed score buckets (~6pt drop on equivalent signals); 78 here matches Pine BALANCED.
+    # Historical (v6 scale): <80 had 33% WR / -$0.36; 80-89 had 50% WR / +$0.66; ≥90 had 29% WR / -$1.52.
+    base_gate = 72 if mode == BotMode.AGGRESSIVE else 78 if mode == BotMode.NORMAL else 88
     # Per-pair bump: pairs with weak rolling WR need stronger setups.
     # SOLUSDT: 17% WR on n=6 (1W/5L), only saved by a single +0.71 winner.
     per_pair_bump = {"SOLUSDT": 3}.get(signal.symbol, 0)
